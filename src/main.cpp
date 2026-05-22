@@ -70,10 +70,21 @@ void ControlTeclado()
     break;
   }
 }
+
+//Prueba para comprabar que los motores esdtan bien configurados
+void moverse(){
+  int velAlta = 140;
+  //int velBaja = 80; // Velocidad reducida para las ruedas interiores en un giro
+  controlarMotores(HIGH, LOW, LOW, HIGH, HIGH, LOW, LOW, HIGH, velAlta, velAlta, velAlta, velAlta);
+}
+
 void loop()
 {
   if (Serial.available() > 0)
   {
     ControlTeclado();
+  }
+  else{
+    moverse();
   }
 }
