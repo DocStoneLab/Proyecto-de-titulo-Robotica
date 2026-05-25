@@ -1,66 +1,82 @@
 #include <Arduino.h>
 
-// Definición de los pines
-const int trigPin = 9;
-const int echoPin = 10;
+// Definición de los pines - CORRECCIÓN: Se requiere un Trigger por sensor
+const int trigPin1 = 9;
+const int trigPin2 = 7; // Asignar a un nuevo pin en el Arduino
+const int echoPin1 = 10;
+const int echoPin2 = 11;
 const int linePin = 8;
 
-// Variables para calcular la distancia
-long duracion;
-int distancia;
-bool Linea;
+// Variables globales limpias
+int distancia1;
+int distancia2;
+bool estadoLinea;
 
-int medir_distancia(){
-  // 1. Limpiar el pin Trig
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  
-  // 2. Emitir un pulso ultrasónico de 10 microsegundos
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-  
-  // 3. Leer el tiempo que tarda el eco en regresar
-  duracion = pulseIn(echoPin, HIGH);
-  
-  // 4. Calcular la distancia (la velocidad del sonido es aprox. 340 m/s o 0.034 cm/µs)
-  // Como el sonido va y vuelve, dividimos el tiempo entre 2.
-  distancia = duracion * 0.034 / 2;
-  
-  // 5. Mostrar el resultado en el Monitor Serial
-  //Serial.print("Distancia: ");
-  //Serial.print(distancia);
-  //Serial.println(" cm");
-  
-  delay(500); // Espera medio segundo antes de la siguiente medición
-
-  return distancia;
+// Función para calcular la distancia
+int calcular_distancia(long duracion) {
+  // Velocidad del sonido 0.034 cm/µs. Dividido por 2 por el rebote.
+  return (duracion * 0.034) / 2;
 }
 
-void avanzar(int distancia){
+// CORRECCIÓN: Paso de variables por referencia para modificar ambas variables globales/locales
+void medir_distancias(int &dist1, int &dist2) {
+  long duracion1, duracion2;
 
-  if (distancia < 30)
-  {
-    Serial.println("No avanzar");
-  }
-  else
-  {
-    Serial.println("avanzar");
-  }
+  // Medición Sensor 1
+  digitalWrite(trigPin1, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin1, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin1, LOW);
+  duracion1 = pulseIn(echoPin1, HIGH);
   
+  // Medición Sensor 2 (Debe ser secuencial debido al bloqueo de pulseIn)
+  digitalWrite(trigPin2, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin2, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin2, LOW);
+  duracion2 = pulseIn(echoPin2, HIGH);
+
+  // Cálculos
+  dist1 = calcular_distancia(duracion1);
+  dist2 = calcular_distancia(duracion2);
+}
+
+// CORRECCIÓN: Ahora recibe ambas distancias o las evalúa según la lógica del robot
+void avanzar(int dist1, int dist2) {
+  // Si cualquiera de los dos sensores detecta un obstáculo a menos de 30cm
+  if (dist1 < 30 || dist2 < 30) {
+    Serial.println("No avanzar");
+  } else {
+    Serial.println("Avanzar");
+  }
 }
 
 void setup() {
-  pinMode(trigPin, OUTPUT); // El pin Trig emite el pulso
-  pinMode(echoPin, INPUT);  // El pin Echo recibe el rebote
-  pinMode(linePin, INPUT);  // EL pin de el Sensor de linea
-  Serial.begin(9600);       // Inicializa la comunicación serial
+  pinMode(trigPin1, OUTPUT);
+  pinMode(trigPin2, OUTPUT);
+  pinMode(echoPin1, INPUT);
+  pinMode(echoPin2, INPUT);
+  pinMode(linePin, INPUT);
+  Serial.begin(9600);
 }
 
 void loop() {
-  Serial.println(medir_distancia());
-  avanzar(medir_distancia());
-  Linea = digitalRead(linePin);
-  Serial.println(Linea);
-
+  // 1. Ejecutar la medición una sola vez por ciclo
+  medir_distancias(distancia1, distancia2);
+  
+  // 2. Imprimir distancias
+  Serial.print("D1: "); Serial.print(distancia1);
+  Serial.print(" cm | D2: "); Serial.print(distancia2); Serial.println(" cm");
+  
+  // 3. Tomar decisión de movimiento
+  avanzar(distancia1, distancia2);
+  
+  // 4. Leer sensor de línea
+  estadoLinea = digitalRead(linePin);
+  Serial.print("Sensor de Linea: ");
+  Serial.println(estadoLinea);
+  
+  delay(500); // Retraso unificado al final del ciclo
 }
