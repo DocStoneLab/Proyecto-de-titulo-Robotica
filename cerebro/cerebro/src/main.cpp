@@ -1,24 +1,30 @@
 #include <Arduino.h>
 
-// Definición de los pines - CORRECCIÓN: Se requiere un Trigger por sensor
+// Definición de pines - Sensores de Ultrasonido
 const int trigPin1 = 9;
-const int trigPin2 = 7; // Asignar a un nuevo pin en el Arduino
 const int echoPin1 = 10;
+const int trigPin2 = 7;
 const int echoPin2 = 11;
-const int linePin = 8;
 
-// Variables globales limpias
-int distancia1;
-int distancia2;
-bool estadoLinea;
+// Definición de pines - Sensores de Línea (TCRT5000)
+const int linePinIzq = 8;
+const int linePinDer = 12; // Pin adicional requerido para cuadrícula
 
-// Función para calcular la distancia
+// Variables de estado
+int distancia1 = 0;
+int distancia2 = 0;
+bool estadoLineaIzq = false;
+bool estadoLineaDer = false;
+
+// Timeout para 50 cm (aprox 3000 microsegundos)
+const unsigned long TIMEOUT_US = 3000; 
+
 int calcular_distancia(long duracion) {
-  // Velocidad del sonido 0.034 cm/µs. Dividido por 2 por el rebote.
+  // Retorna 0 si la duración es 0 (ocurre cuando pulseIn alcanza el timeout)
+  if (duracion == 0) return 999; // 999 representa "vía libre"
   return (duracion * 0.034) / 2;
 }
 
-// CORRECCIÓN: Paso de variables por referencia para modificar ambas variables globales/locales
 void medir_distancias(int &dist1, int &dist2) {
   long duracion1, duracion2;
 
@@ -28,28 +34,40 @@ void medir_distancias(int &dist1, int &dist2) {
   digitalWrite(trigPin1, HIGH);
   delayMicroseconds(10);
   digitalWrite(trigPin1, LOW);
-  duracion1 = pulseIn(echoPin1, HIGH);
+  duracion1 = pulseIn(echoPin1, HIGH, TIMEOUT_US); 
   
-  // Medición Sensor 2 (Debe ser secuencial debido al bloqueo de pulseIn)
+  // Medición Sensor 2
   digitalWrite(trigPin2, LOW);
   delayMicroseconds(2);
   digitalWrite(trigPin2, HIGH);
   delayMicroseconds(10);
   digitalWrite(trigPin2, LOW);
-  duracion2 = pulseIn(echoPin2, HIGH);
+  duracion2 = pulseIn(echoPin2, HIGH, TIMEOUT_US);
 
-  // Cálculos
   dist1 = calcular_distancia(duracion1);
   dist2 = calcular_distancia(duracion2);
 }
 
-// CORRECCIÓN: Ahora recibe ambas distancias o las evalúa según la lógica del robot
-void avanzar(int dist1, int dist2) {
-  // Si cualquiera de los dos sensores detecta un obstáculo a menos de 30cm
-  if (dist1 < 30 || dist2 < 30) {
-    Serial.println("No avanzar");
+void evaluar_entorno() {
+  // Lectura de los dos sensores de línea
+  estadoLineaIzq = digitalRead(linePinIzq);
+  estadoLineaDer = digitalRead(linePinDer);
+
+  // Lógica de prioridad: La seguridad (ultrasonido) anula la odometría (infrarrojo)
+  if (distancia1 < 30 || distancia2 < 30) {
+    Serial.println("EVASIÓN: Obstáculo detectado. Detener motores.");
+    // Aquí invocarás: detenerMotores();
   } else {
-    Serial.println("Avanzar");
+    // Lógica de seguimiento de línea (Ejemplo discreto)
+    if (estadoLineaIzq == HIGH && estadoLineaDer == HIGH) {
+      Serial.println("INTERSECCIÓN: Evaluar giro.");
+    } else if (estadoLineaIzq == HIGH) {
+      Serial.println("DESVÍO DERECHA: Corrigiendo a la izquierda.");
+    } else if (estadoLineaDer == HIGH) {
+      Serial.println("DESVÍO IZQUIERDA: Corrigiendo a la derecha.");
+    } else {
+      Serial.println("VÍA LIBRE: Avanzando recto.");
+    }
   }
 }
 
@@ -58,25 +76,15 @@ void setup() {
   pinMode(trigPin2, OUTPUT);
   pinMode(echoPin1, INPUT);
   pinMode(echoPin2, INPUT);
-  pinMode(linePin, INPUT);
+  pinMode(linePinIzq, INPUT);
+  pinMode(linePinDer, INPUT);
   Serial.begin(9600);
 }
 
 void loop() {
-  // 1. Ejecutar la medición una sola vez por ciclo
   medir_distancias(distancia1, distancia2);
+  evaluar_entorno();
   
-  // 2. Imprimir distancias
-  Serial.print("D1: "); Serial.print(distancia1);
-  Serial.print(" cm | D2: "); Serial.print(distancia2); Serial.println(" cm");
-  
-  // 3. Tomar decisión de movimiento
-  avanzar(distancia1, distancia2);
-  
-  // 4. Leer sensor de línea
-  estadoLinea = digitalRead(linePin);
-  Serial.print("Sensor de Linea: ");
-  Serial.println(estadoLinea);
-  
-  delay(500); // Retraso unificado al final del ciclo
+  // Pausa mínima de estabilidad del ciclo (no interfiere con la odometría local)
+  delay(10); 
 }
