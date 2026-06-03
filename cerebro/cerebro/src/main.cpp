@@ -1,90 +1,127 @@
 #include <Arduino.h>
+#include <SoftwareSerial.h>
+#include <SPI.h>
+#include <nRF24L01.h>
+#include <RF24.h>
 
-// Definición de pines - Sensores de Ultrasonido
+// 1. Configuración de Comunicación
+SoftwareSerial serialMotores(2, 3); // RX en 2, TX en 3 (Hacia Arduino Motores)
+RF24 radio(4, 5);                   // CE en 4, CSN en 5 (Bus SPI en 11, 12, 13)
+const byte direccionBase[6] = "00001";
+
+// 2. Asignación de Pines
 const int trigPin1 = 9;
 const int echoPin1 = 10;
 const int trigPin2 = 7;
-const int echoPin2 = 11;
+const int echoPin2 = 6;  // Modificado (Evitar conflicto SPI)
 
-// Definición de pines - Sensores de Línea (TCRT5000)
-const int linePinIzq = 8;
-const int linePinDer = 12; // Pin adicional requerido para cuadrícula
+const int linePinIzq = A0;
+const int linePinCen = A1;
+const int linePinDer = A2;
 
-// Variables de estado
-int distancia1 = 0;
-int distancia2 = 0;
-bool estadoLineaIzq = false;
-bool estadoLineaDer = false;
+const int pinGasMQ5 = A3;
+const int pinHumedad = A4;
 
-// Timeout para 50 cm (aprox 3000 microsegundos)
-const unsigned long TIMEOUT_US = 3000; 
+const unsigned long TIMEOUT_US = 3000;
 
+// 3. Estructura de Telemetría (Debe ser idéntica en el Arduino receptor)
+struct Telemetria {
+  int distIzquierda;
+  int distDerecha;
+  bool lineaIzquierda;
+  bool lineaCentro;
+  bool lineaDerecha;
+  int nivelGas;
+  int nivelHumedad;
+};
+Telemetria datosRobot;
+
+// Función para calcular distancia
 int calcular_distancia(long duracion) {
-  // Retorna 0 si la duración es 0 (ocurre cuando pulseIn alcanza el timeout)
-  if (duracion == 0) return 999; // 999 representa "vía libre"
+  if (duracion == 0) return 999;
   return (duracion * 0.034) / 2;
 }
 
-void medir_distancias(int &dist1, int &dist2) {
-  long duracion1, duracion2;
-
-  // Medición Sensor 1
-  digitalWrite(trigPin1, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin1, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin1, LOW);
-  duracion1 = pulseIn(echoPin1, HIGH, TIMEOUT_US); 
+// Lectura acústica bloqueante optimizada por Timeout
+void medir_distancias() {
+  long dur1, dur2;
   
-  // Medición Sensor 2
-  digitalWrite(trigPin2, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin2, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin2, LOW);
-  duracion2 = pulseIn(echoPin2, HIGH, TIMEOUT_US);
+  digitalWrite(trigPin1, LOW); delayMicroseconds(2);
+  digitalWrite(trigPin1, HIGH); delayMicroseconds(10); digitalWrite(trigPin1, LOW);
+  dur1 = pulseIn(echoPin1, HIGH, TIMEOUT_US); 
+  
+  digitalWrite(trigPin2, LOW); delayMicroseconds(2);
+  digitalWrite(trigPin2, HIGH); delayMicroseconds(10); digitalWrite(trigPin2, LOW);
+  dur2 = pulseIn(echoPin2, HIGH, TIMEOUT_US);
 
-  dist1 = calcular_distancia(duracion1);
-  dist2 = calcular_distancia(duracion2);
+  datosRobot.distIzquierda = calcular_distancia(dur1);
+  datosRobot.distDerecha = calcular_distancia(dur2);
 }
 
-void evaluar_entorno() {
-  // Lectura de los dos sensores de línea
-  estadoLineaIzq = digitalRead(linePinIzq);
-  estadoLineaDer = digitalRead(linePinDer);
+// Actualización de estado del entorno
+void leer_entorno() {
+  datosRobot.lineaIzquierda = digitalRead(linePinIzq);
+  datosRobot.lineaCentro = digitalRead(linePinCen);
+  datosRobot.lineaDerecha = digitalRead(linePinDer);
+  
+  datosRobot.nivelGas = analogRead(pinGasMQ5);
+  datosRobot.nivelHumedad = analogRead(pinHumedad);
+}
 
-  // Lógica de prioridad: La seguridad (ultrasonido) anula la odometría (infrarrojo)
-  if (distancia1 < 30 || distancia2 < 30) {
-    Serial.println("EVASIÓN: Obstáculo detectado. Detener motores.");
-    // Aquí invocarás: detenerMotores();
+// Lógica central y transmisión de datos
+void evaluar_y_transmitir() {
+  char comandoMotor = 'S'; 
+  
+  // A. Evasión de colisiones (Seguridad Activa)
+  if (datosRobot.distIzquierda < 30 || datosRobot.distDerecha < 30) {
+    comandoMotor = 'S'; // Stop
   } else {
-    // Lógica de seguimiento de línea (Ejemplo discreto)
-    if (estadoLineaIzq == HIGH && estadoLineaDer == HIGH) {
-      Serial.println("INTERSECCIÓN: Evaluar giro.");
-    } else if (estadoLineaIzq == HIGH) {
-      Serial.println("DESVÍO DERECHA: Corrigiendo a la izquierda.");
-    } else if (estadoLineaDer == HIGH) {
-      Serial.println("DESVÍO IZQUIERDA: Corrigiendo a la derecha.");
+    // B. Odometría de 3 Sensores (1 = Línea Negra, 0 = Fondo Claro)
+    bool I = datosRobot.lineaIzquierda;
+    bool C = datosRobot.lineaCentro;
+    bool D = datosRobot.lineaDerecha;
+
+    if (I && C && D) {
+      comandoMotor = 'X'; // Intersección completa
+    } else if (!I && C && !D) {
+      comandoMotor = 'A'; // Centrado -> Avanzar Recto
+    } else if (I && !D) {
+      comandoMotor = 'I'; // Desvío detectado a la derecha -> Girar Izquierda
+    } else if (!I && D) {
+      comandoMotor = 'D'; // Desvío detectado a la izquierda -> Girar Derecha
     } else {
-      Serial.println("VÍA LIBRE: Avanzando recto.");
+      comandoMotor = 'S'; // Fuera de línea -> Stop o Búsqueda
     }
   }
+
+  // C. Transmisión Serial al Arduino Motores
+  serialMotores.println(comandoMotor);
+  
+  // D. Transmisión RF a la Estación Base
+  radio.write(&datosRobot, sizeof(datosRobot));
 }
 
 void setup() {
-  pinMode(trigPin1, OUTPUT);
-  pinMode(trigPin2, OUTPUT);
-  pinMode(echoPin1, INPUT);
-  pinMode(echoPin2, INPUT);
+  serialMotores.begin(9600);
+  
+  pinMode(trigPin1, OUTPUT); pinMode(trigPin2, OUTPUT);
+  pinMode(echoPin1, INPUT); pinMode(echoPin2, INPUT);
+  
   pinMode(linePinIzq, INPUT);
+  pinMode(linePinCen, INPUT);
   pinMode(linePinDer, INPUT);
-  Serial.begin(9600);
+  
+  // Configuración RF
+  if (radio.begin()) {
+    radio.openWritingPipe(direccionBase);
+    radio.setPALevel(RF24_PA_MIN);
+    radio.stopListening(); 
+  }
 }
 
 void loop() {
-  medir_distancias(distancia1, distancia2);
-  evaluar_entorno();
-  
-  // Pausa mínima de estabilidad del ciclo (no interfiere con la odometría local)
+  medir_distancias();
+  leer_entorno();
+  evaluar_y_transmitir();
   delay(10); 
 }
