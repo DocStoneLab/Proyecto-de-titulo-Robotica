@@ -1,17 +1,16 @@
 #include <Arduino.h>
-// #include <SoftwareSerial.h> // COMENTADO PARA PRUEBAS
-// #include <SPI.h>            // COMENTADO PARA PRUEBAS
-// #include <nRF24L01.h>       // COMENTADO PARA PRUEBAS
-// #include <RF24.h>           // COMENTADO PARA PRUEBAS
+#include <SoftwareSerial.h>
+#include <SPI.h>
+#include <nRF24L01.h>
+#include <RF24.h>
 
-// 1. Configuración de Comunicación
-// SoftwareSerial serialMotores(2, 3); // COMENTADO PARA PRUEBAS
-// RF24 radio(4, 5);                   // COMENTADO PARA PRUEBAS
-// const byte direccionBase[6] = "00001"; // COMENTADO PARA PRUEBAS
+SoftwareSerial serialMotores(2, 3); // RX=2, TX=3 (Hacia Motores)
+RF24 radio(4, 5);                   // CE=4, CSN=5 (Hacia Estación Base)
+const byte direccionBase[6] = "00001";
 
-// 2. Asignación de Pines
+// Asignación de Pines
 const int trigPin1 = 9;
-const int echoPin1 = 8;  // Mantenemos el pin 8 para evitar conflicto futuro
+const int echoPin1 = 8;
 const int trigPin2 = 7;
 const int echoPin2 = 6;  
 
@@ -19,30 +18,28 @@ const int linePinIzq = A0;
 const int linePinCen = A1;
 const int linePinDer = A2;
 
-// const int pinGasMQ5 = A3;  // COMENTADO PARA PRUEBAS
-const int pinHumedad = A4; // COMENTADO PARA PRUEBAS
+const int pinGasMQ5 = A3;
+const int pinHumedad = A4;
 
-const unsigned long TIMEOUT_US = 3000000;
+const unsigned long TIMEOUT_US = 3000; // ~50cm max
 
-// 3. Estructura de Telemetría
+// Estructura empaquetada para RF
 struct __attribute__((packed)) Telemetria {
   int16_t distIzquierda;
   int16_t distDerecha;
   uint8_t lineaIzquierda;
   uint8_t lineaCentro;
   uint8_t lineaDerecha;
-  // int16_t nivelGas;      // COMENTADO PARA PRUEBAS
-  int16_t nivelHumedad;  // COMENTADO PARA PRUEBAS
+  int16_t nivelGas;
+  int16_t nivelHumedad;
 };
 Telemetria datosRobot;
 
-// Función para calcular distancia
 int16_t calcular_distancia(unsigned long duracion) {
   if (duracion == 0) return 999;
   return (duracion * 0.034) / 2;
 }
 
-// Lectura acústica bloqueante optimizada por Timeout
 void medir_distancias() {
   unsigned long dur1, dur2;
   
@@ -58,90 +55,86 @@ void medir_distancias() {
   datosRobot.distDerecha = calcular_distancia(dur2);
 }
 
-// Actualización de estado del entorno
 void leer_entorno() {
   datosRobot.lineaIzquierda = digitalRead(linePinIzq);
   datosRobot.lineaCentro = digitalRead(linePinCen);
   datosRobot.lineaDerecha = digitalRead(linePinDer);
-  
-  // COMENTADO PARA PRUEBAS
-  // datosRobot.nivelGas = analogRead(pinGasMQ5);
+  datosRobot.nivelGas = analogRead(pinGasMQ5);
   datosRobot.nivelHumedad = analogRead(pinHumedad);
 }
 
-// Lógica central y transmisión de datos
 void evaluar_y_transmitir() {
-  char comandoMotor = 'S'; 
+  //========================Eliminar
+  // INICIO DE DEBUG POR TECLADO (PC)
+  if (Serial.available() > 0) {
+    char tecla = Serial.read();
+    
+    // Ignorar caracteres de salto de línea (\n) o retorno de carro (\r) del Monitor Serie
+    if (tecla != '\n' && tecla != '\r') {
+      char comandoManual = tolower(tecla); // Forzar a minúscula para compatibilidad
+      
+      // Enviar instrucción al Arduino Esclavo
+      serialMotores.println(comandoManual);
+      
+      // Confirmación visual en la PC
+      Serial.print("[DEBUG TECLADO] Instruccion enviada al puente H: [");
+      Serial.print(comandoManual);
+      Serial.println("]");
+    }
+  }
+  //===========================Eliminar
+  /*
+  char comandoMotor = ' '; 
   
-  // A. Evasión de colisiones
+  // A. Seguridad Activa (Ultrasonido)
   if (datosRobot.distIzquierda < 30 || datosRobot.distDerecha < 30) {
-    comandoMotor = 'S'; // Stop
+    comandoMotor = ' '; // Stop
   } else {
-    // B. Odometría de 3 Sensores
+    // B. Odometría (Infrarrojo)
     uint8_t I = datosRobot.lineaIzquierda;
     uint8_t C = datosRobot.lineaCentro;
     uint8_t D = datosRobot.lineaDerecha;
 
     if (I && C && D) {
-      comandoMotor = 'X'; 
+      comandoMotor = ' '; // Intersección (Stop preventivo)
     } else if (!I && C && !D) {
-      comandoMotor = 'A'; 
+      comandoMotor = 'w'; // Avanzar
     } else if (I && !D) {
-      comandoMotor = 'I'; 
+      comandoMotor = 'a'; // Girar Izquierda
     } else if (!I && D) {
-      comandoMotor = 'D'; 
+      comandoMotor = 'd'; // Girar Derecha
     } else {
-      comandoMotor = 'S'; 
+      comandoMotor = ' '; // Fuera de línea
     }
   }
 
-  // C. Transmisión Serial (COMENTADO PARA PRUEBAS)
-  // serialMotores.println(comandoMotor);
+  // C. Transmitir UART a Motores
+  serialMotores.println(comandoMotor);
   
-  // D. Transmisión RF (COMENTADO PARA PRUEBAS)
-  // radio.write(&datosRobot, sizeof(datosRobot));
-
-  // E. Monitoreo por Serial Hardware para el Test (PC)
-  static unsigned long ultimoPrint = 0;
-  if (millis() - ultimoPrint >= 500) { 
-    ultimoPrint = millis();
-    Serial.print("[TEST SENSORES] Dist: Izq="); Serial.print(datosRobot.distIzquierda);
-    Serial.print("cm, Der="); Serial.print(datosRobot.distDerecha);
-    Serial.print("cm | Linea (Izq-Cen-Der): ");
-    Serial.print(datosRobot.lineaIzquierda ? "1" : "0");
-    Serial.print(datosRobot.lineaCentro ? "1" : "0");
-    Serial.print(datosRobot.lineaDerecha ? "1" : "0");
-    
-    // COMENTADO PARA PRUEBAS
-    // Serial.print(" | Gas: "); Serial.print(datosRobot.nivelGas);
-    Serial.print(" | Hum: "); Serial.print(datosRobot.nivelHumedad);
-    
-    Serial.print(" | Cmd Calculado: "); Serial.println(comandoMotor);
-  }
+  // D. Transmitir SPI/RF a Estación Base
+  radio.write(&datosRobot, sizeof(datosRobot));
+*/
 }
 
 void setup() {
-  Serial.begin(115200); 
-  // serialMotores.begin(9600); // COMENTADO PARA PRUEBAS
+  //Inicializacion del puerto Serie por Hardware (Para debug)
+  Serial.begin(115200);
+
+  //Inicializacion del puerto Serie por software (Hacia Arduino Morotes)
+  serialMotores.begin(9600);
   
   pinMode(trigPin1, OUTPUT); pinMode(trigPin2, OUTPUT);
-  pinMode(echoPin1, INPUT); pinMode(echoPin2, INPUT);
+  pinMode(echoPin1, INPUT);  pinMode(echoPin2, INPUT);
+  pinMode(linePinIzq, INPUT); pinMode(linePinCen, INPUT); pinMode(linePinDer, INPUT);
   
-  pinMode(linePinIzq, INPUT);
-  pinMode(linePinCen, INPUT);
-  pinMode(linePinDer, INPUT);
-  
-  // Configuración RF (COMENTADO PARA PRUEBAS)
-  /*
   if (radio.begin()) {
     radio.openWritingPipe(direccionBase);
     radio.setPALevel(RF24_PA_MIN);
     radio.setDataRate(RF24_1MBPS); 
     radio.stopListening(); 
   }
-  */
-  
-  Serial.println("--- Modo Prueba: Sensores Ultrasónicos y de Línea Inicializados ---");
+
+  Serial.println("Arduino Maestro Iniciado. Iniciando telemetria...");
 }
 
 void loop() {
