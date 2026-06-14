@@ -1,10 +1,9 @@
 #include <Arduino.h>
+#include <RH_ASK.h>
 #include <SPI.h>
-#include <nRF24L01.h>
-#include <RF24.h>
 
-RF24 radio(4, 5); 
-const byte direccionBase[6] = "00001"; 
+// Configuración RadioHead: Velocidad 2000 bps, RX pin=11, TX pin(no usado)=12, PTT pin (no usado, fijado a pin 10 libre)=10
+RH_ASK radio(2000, 11, 12, 10);
 
 const int pinBuzzer = 8;
 const int UMBRAL_GAS = 400; 
@@ -26,30 +25,37 @@ void setup() {
   pinMode(pinBuzzer, OUTPUT);
   digitalWrite(pinBuzzer, LOW);
   
-  if (!radio.begin()) {
-    Serial.println("Error RF");
-    while (1); 
+  if (!radio.init()) {
+    Serial.println("Fallo crítico: Receptor 433MHz no inicializado.");
+    while(1);
   }
-  
-  radio.openReadingPipe(0, direccionBase);
-  radio.setPALevel(RF24_PA_MIN);
-  radio.setDataRate(RF24_1MBPS);
-  radio.startListening(); 
-  Serial.println("Estacion Base Lista.");
+  Serial.println("Estacion Base 433MHz Lista. Esperando datos...");
 }
 
 void loop() {
-  if (radio.available()) {
-    radio.read(&datosRobot, sizeof(datosRobot));
-    
-    Serial.print("Dist[I-D]: "); Serial.print(datosRobot.distIzquierda); Serial.print("-"); Serial.print(datosRobot.distDerecha);
-    Serial.print(" | Gas: "); Serial.print(datosRobot.nivelGas);
-    Serial.print(" | Hum: "); Serial.println(datosRobot.nivelHumedad);
+  uint8_t longitudBuffer = sizeof(datosRobot);
+  
+  // Si se recibe un paquete y la longitud coincide con nuestra estructura
+  if (radio.recv((uint8_t*)&datosRobot, &longitudBuffer)) {
+    if (longitudBuffer == sizeof(datosRobot)) {
+      
+      Serial.println("\n--- TELEMETRÍA RECIBIDA ---");
+      Serial.print("Dist[I-D]: "); Serial.print(datosRobot.distIzquierda); Serial.print("-"); Serial.print(datosRobot.distDerecha);
+      Serial.print(" | Líneas[I-C-D]: "); 
+      Serial.print(datosRobot.lineaIzquierda); Serial.print("-");
+      Serial.print(datosRobot.lineaCentro); Serial.print("-");
+      Serial.print(datosRobot.lineaDerecha);
+      Serial.print(" | Gas: "); Serial.print(datosRobot.nivelGas);
+      Serial.print(" | Hum: "); Serial.println(datosRobot.nivelHumedad);
 
-    if (datosRobot.nivelGas > UMBRAL_GAS) {
-      digitalWrite(pinBuzzer, HIGH);
-    } else {
-      digitalWrite(pinBuzzer, LOW);
+      // Evaluación del sensor
+      if (datosRobot.nivelGas > UMBRAL_GAS) {
+        digitalWrite(pinBuzzer, HIGH);
+        Serial.println("¡ALERTA CRÍTICA: GAS DETECTADO!");
+      } else {
+        digitalWrite(pinBuzzer, LOW);
+      }
+      
     }
   }
 }
