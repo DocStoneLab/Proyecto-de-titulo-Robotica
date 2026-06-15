@@ -126,12 +126,12 @@ void evaluar_y_transmitir() {
   }
 
   // 2. INTERRUPCIÓN POR TECLADO (Sobrescribe la lógica autónoma si estás en PC)
-  if (Serial.available() > 0) {
+  /*if (Serial.available() > 0) {
     char tecla = Serial.read();
     if (tecla != '\n' && tecla != '\r') {
       comandoMotor = tolower(tecla); 
     }
-  }
+  }*/
 
   // 3. ENVÍO DE DATOS A NODO DE TRACCIÓN (UART) - Solo si hay un cambio de comando para no saturar con interrupciones
   static char ultimoComandoMotor = 'x';
