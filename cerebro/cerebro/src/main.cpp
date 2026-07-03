@@ -1,32 +1,27 @@
 #include <Arduino.h>
 #include <SoftwareSerial.h>
-#include <RH_ASK.h> // NUEVA LIBRERÍA: RadioHead ASK
-#include <SPI.h>    // Requerido por la arquitectura interna de RadioHead
+#include <RH_ASK.h> 
+#include <SPI.h>    
 
 SoftwareSerial serialMotores(2, 3); // RX=2, TX=3 (Hacia Motores)
 
-// Configuración RadioHead: Velocidad 2000 bps, RX pin (no usado)=11, TX pin=12, PTT pin (no usado, fijado a pin 10 libre)=10
+// Configuración RadioHead: 2000 bps, RX=11(NC), TX=12, PTT=10
 RH_ASK radio(2000, 11, 12, 10);
 
-// Asignación de Pines de Sensores
-const int trigPin1 = 9;
-const int echoPin1 = 8;
-const int trigPin2 = 7;
-const int echoPin2 = 6;  
-
-const int linePinIzq = A0;
-const int linePinCen = A1;
+// Pines Sensores
+const int trigPinFrente = 9;  const int echoPinFrente = 8;
+const int trigPinAtras = 7;   const int echoPinAtras = 6;  
+const int linePinIzq = A0; 
+const int linePinCen = A1; 
 const int linePinDer = A2;
-
 const int pinGasMQ5 = A3;
 const int pinHumedad = A4;
 
-const unsigned long TIMEOUT_US = 5000; // 5ms equivale a ~85 cm (suficiente para detectar obstáculo a <30cm sin esperar de más)
+const unsigned long TIMEOUT_US = 5000; 
 
-// Estructura empaquetada para transmisión
 struct __attribute__((packed)) Telemetria {
-  int16_t distIzquierda;
-  int16_t distDerecha;
+  int16_t distFrente;
+  int16_t distAtras;
   uint8_t lineaIzquierda;
   uint8_t lineaCentro;
   uint8_t lineaDerecha;
@@ -37,131 +32,114 @@ Telemetria datosRobot;
 
 int16_t calcular_distancia(unsigned long duracion) {
   if (duracion == 0) return 999;
-  return (duracion * 0.034) / 2;
+  // Optimización AVR: División entera (58.3 us/cm ida y vuelta) para evitar FPU por software
+  return (int16_t)(duracion / 58);
 }
 
 void medir_distancias() {
-  unsigned long dur1, dur2;
-  
-  // Guardamos el estado y desactivamos la interrupción del Timer 1 (RadioHead)
-  // para evitar que interfiera con la precisión de pulseIn() y cause jitter en las lecturas
-  byte oldTIMSK1 = TIMSK1;
-  TIMSK1 &= ~_BV(OCIE1A);
+  static bool turnoFrente = true; 
+  unsigned long duracion = 0;
 
-  // Sensor 1 (Izquierda)
-  digitalWrite(trigPin1, LOW); delayMicroseconds(2);
-  digitalWrite(trigPin1, HIGH); delayMicroseconds(10); digitalWrite(trigPin1, LOW);
-  dur1 = pulseIn(echoPin1, HIGH, TIMEOUT_US); 
-  
-  // Si dur1 es 0, el sensor pudo haber quedado en timeout.
-  // Realizamos un reset físico/eléctrico momentáneo del pin Echo.
-  if (dur1 == 0) {
-    pinMode(echoPin1, OUTPUT);
-    digitalWrite(echoPin1, LOW);
-    delayMicroseconds(50);
-    pinMode(echoPin1, INPUT);
-  }
-  
-  // Pausa corta de 15ms para evitar rebote acústico (cross-talk) entre sensores
-  delay(15);
-  
-  // Sensor 2 (Derecha)
-  digitalWrite(trigPin2, LOW); delayMicroseconds(2);
-  digitalWrite(trigPin2, HIGH); delayMicroseconds(10); digitalWrite(trigPin2, LOW);
-  dur2 = pulseIn(echoPin2, HIGH, TIMEOUT_US);
+  if (turnoFrente) {
+    digitalWrite(trigPinFrente, LOW); delayMicroseconds(2);
+    digitalWrite(trigPinFrente, HIGH); delayMicroseconds(10); digitalWrite(trigPinFrente, LOW);
+    duracion = pulseIn(echoPinFrente, HIGH, TIMEOUT_US); 
+    
+    if (duracion == 0) {
+      pinMode(echoPinFrente, OUTPUT); digitalWrite(echoPinFrente, LOW);
+      delayMicroseconds(50); pinMode(echoPinFrente, INPUT);
+    }
+    datosRobot.distFrente = calcular_distancia(duracion);
+  } else {
+    digitalWrite(trigPinAtras, LOW); delayMicroseconds(2);
+    digitalWrite(trigPinAtras, HIGH); delayMicroseconds(10); digitalWrite(trigPinAtras, LOW);
+    duracion = pulseIn(echoPinAtras, HIGH, TIMEOUT_US);
 
-  // Reset físico/eléctrico si hay timeout
-  if (dur2 == 0) {
-    pinMode(echoPin2, OUTPUT);
-    digitalWrite(echoPin2, LOW);
-    delayMicroseconds(50);
-    pinMode(echoPin2, INPUT);
+    if (duracion == 0) {
+      pinMode(echoPinAtras, OUTPUT); digitalWrite(echoPinAtras, LOW);
+      delayMicroseconds(50); pinMode(echoPinAtras, INPUT);
+    }
+    datosRobot.distAtras = calcular_distancia(duracion);
   }
 
-  // Restauramos la interrupción de la radio
-  TIMSK1 = oldTIMSK1;
-
-  datosRobot.distIzquierda = calcular_distancia(dur1);
-  datosRobot.distDerecha = calcular_distancia(dur2);
+  turnoFrente = !turnoFrente; 
 }
 
-
 void leer_entorno() {
-  
   datosRobot.lineaIzquierda = digitalRead(linePinIzq);
-  datosRobot.lineaCentro = digitalRead(linePinCen);
+  datosRobot.lineaCentro = digitalRead(linePinCen); 
   datosRobot.lineaDerecha = digitalRead(linePinDer);
   datosRobot.nivelGas = analogRead(pinGasMQ5);
   datosRobot.nivelHumedad = analogRead(pinHumedad);
-
-  // ===============================Eliminar
-  // SIMULACIÓN DE LÍNEA CENTRAL PARA PRUEBA DE AVANCE ('w')
-  // Forzamos las condiciones ideales: No hay línea a los lados (0), pero sí al centro (1)
-  datosRobot.lineaCentro = 1;    // Simulamos que el sensor del medio siempre detecta la línea
-  // ===============================Eliminar
 }
 
 void evaluar_y_transmitir() {
   char comandoMotor = ' '; 
 
-  // 1. LÓGICA AUTÓNOMA (Cálculo base)
-  if (datosRobot.distIzquierda < 30 || datosRobot.distDerecha < 30) {
-    comandoMotor = ' '; // Prioridad absoluta: Evasión (Stop)
+  // 1. LÓGICA DE EVASIÓN FRONTAL
+  if (datosRobot.distFrente < 30) {
+    comandoMotor = ' '; 
   } else {
+    
+    // 2. LÓGICA DE SEGUIMIENTO (Reducción Booleana)
     uint8_t I = datosRobot.lineaIzquierda;
-    uint8_t C = datosRobot.lineaCentro;
+    uint8_t C = datosRobot.lineaCentro; 
     uint8_t D = datosRobot.lineaDerecha;
+    
+    static char ultimaCurva = 'w';
 
     if (I && C && D) {
-      comandoMotor = ' '; // Intersección
-    } else if (!I && C && !D) {
-      comandoMotor = 'w'; // Avanzar
-    } else if (I && !D) {
-      comandoMotor = 'a'; // Corrección Izquierda
-    } else if (!I && D) {
-      comandoMotor = 'd'; // Corrección Derecha
-    } else {
-      comandoMotor = ' '; // Fuera de línea
+      comandoMotor = 'w'; // Intersección
+      ultimaCurva = 'w';
+    } 
+    else if (!I && C && !D) {
+      comandoMotor = 'w'; // Centrado
+      ultimaCurva = 'w';
+    } 
+    // Correcciones Izquierda (Abarca estados con o sin sensor central)
+    else if (I && !D) {
+      comandoMotor = 'a'; 
+      ultimaCurva = 'a'; 
+    } 
+    // Correcciones Derecha (Abarca estados con o sin sensor central)
+    else if (!I && D) {
+      comandoMotor = 'd'; 
+      ultimaCurva = 'd'; 
+    } 
+    // PÉRDIDA TOTAL DE LÍNEA (!I && !C && !D)
+    else { 
+      if (ultimaCurva == 'a' || ultimaCurva == 'd') {
+        comandoMotor = ultimaCurva; // Girar hasta reenganchar pista
+      } else {
+        comandoMotor = ' '; // Freno por salida de pista imprevista
+      }
     }
   }
 
-  // 2. INTERRUPCIÓN POR TECLADO (Sobrescribe la lógica autónoma si estás en PC)
-  /*if (Serial.available() > 0) {
-    char tecla = Serial.read();
-    if (tecla != '\n' && tecla != '\r') {
-      comandoMotor = tolower(tecla); 
-    }
-  }*/
-
-  // 3. ENVÍO DE DATOS A NODO DE TRACCIÓN (UART) - Solo si hay un cambio de comando para no saturar con interrupciones
+  // 3. ENVÍO UART CONDICIONAL
   static char ultimoComandoMotor = 'x';
   if (comandoMotor != ultimoComandoMotor) {
     ultimoComandoMotor = comandoMotor;
-    serialMotores.print(comandoMotor); // Usar print en lugar de println para ahorrar bytes e interrupciones bloqueadas
+    serialMotores.print(comandoMotor); 
   }
   
-  // 4. TRANSMISIÓN RF Y DEPURACIÓN EN PANTALLA (Temporizado a 500ms)
+  // 4. TRANSMISIÓN RF ASÍNCRONA Y VOLCADO DE DEPURACIÓN (500ms)
   static unsigned long ultimaTransmision = 0;
   if (millis() - ultimaTransmision >= 500) {
     ultimaTransmision = millis();
     
-    // Transmisión inalámbrica 433 MHz a la Estación Base
+    // Envio no bloqueante: la interrupción del Timer 1 maneja la modulación en segundo plano
     radio.send((uint8_t *)&datosRobot, sizeof(datosRobot));
-    radio.waitPacketSent();
     
-    // Volcado de Depuración Visual (Monitor Serie a 115200 baudios)
     Serial.println("=========================================");
     Serial.println("      DEBUG NAVBOT (NODO CEREBRO)        ");
     Serial.println("=========================================");
-    Serial.print("ODOMETRÍA   | Izq: "); Serial.print(datosRobot.distIzquierda); 
-    Serial.print(" cm \t Der: "); Serial.print(datosRobot.distDerecha); Serial.println(" cm");
+    Serial.print("ODOMETRÍA   | Frente: "); Serial.print(datosRobot.distFrente); 
+    Serial.print(" cm \t Atras: "); Serial.print(datosRobot.distAtras); Serial.println(" cm");
     
     Serial.print("INFRARROJOS | I: "); Serial.print(datosRobot.lineaIzquierda); 
     Serial.print(" \t C: "); Serial.print(datosRobot.lineaCentro);
     Serial.print(" \t D: "); Serial.println(datosRobot.lineaDerecha);
-    
-    Serial.print("AMBIENTAL   | Gas: "); Serial.print(datosRobot.nivelGas); 
-    Serial.print(" \t Hum: "); Serial.println(datosRobot.nivelHumedad);
     
     Serial.print("ESTADO UART | Cmd hacia motores: [ "); 
     Serial.print(comandoMotor); Serial.println(" ]");
@@ -171,23 +149,19 @@ void evaluar_y_transmitir() {
 
 void setup() {
   serialMotores.begin(9600);
-  Serial.begin(115200);
+  Serial.begin(115200); 
   
-  pinMode(trigPin1, OUTPUT); pinMode(trigPin2, OUTPUT);
-  pinMode(echoPin1, INPUT);  pinMode(echoPin2, INPUT);
+  pinMode(trigPinFrente, OUTPUT); pinMode(trigPinAtras, OUTPUT);
+  pinMode(echoPinFrente, INPUT);  pinMode(echoPinAtras, INPUT);
   pinMode(linePinIzq, INPUT); pinMode(linePinCen, INPUT); pinMode(linePinDer, INPUT);
   
-  // Inicializar hardware 433MHz
   if (!radio.init()) {
-    Serial.println("Fallo critico: Modulo 433MHz no inicializado.");
-  } else {
-    Serial.println("Transmisor 433MHz en linea.");
+    Serial.println("Error critico: Modulo RF no inicializado");
   }
 }
 
 void loop() {
   medir_distancias();
   leer_entorno();
-  evaluar_y_transmitir();
-  delay(10); 
+  evaluar_y_transmitir(); 
 }

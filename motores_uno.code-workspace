@@ -1,0 +1,19 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"name": "cerebro",
+			"path": "../../cerebro/cerebro"
+		},
+		{
+			"path": "../.."
+		},
+		{
+			"name": "Uno_Receptor",
+			"path": "../../uno_receptor/Uno_Receptor"
+		}
+	],
+	"settings": {}
+}
