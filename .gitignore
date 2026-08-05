@@ -3,3 +3,11 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+.pio/
+.vscode/
+include/
+lib/
+test/
+credentials.json
+logger.py
+
