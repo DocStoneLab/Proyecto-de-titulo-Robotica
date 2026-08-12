@@ -9,7 +9,7 @@ const int SWITCH_PIN    = 6;
 // Increase this value if still off-center, decrease if overcorrecting
 const int SWITCH_OFFSET = 100;
 
-Stepper stepper(STEPS_PER_REV, 2, 4, 3, 5);
+Stepper stepper(STEPS_PER_REV, 11, 13, 12, 10);
 
 bool autoPan      = false;
 int  panDirection = -1;
