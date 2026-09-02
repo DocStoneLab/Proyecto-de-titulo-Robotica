@@ -10,4 +10,5 @@ lib/
 test/
 credentials.json
 logger.py
-
+comando_voz.py
+test.wav
