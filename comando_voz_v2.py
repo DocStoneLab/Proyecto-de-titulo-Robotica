@@ -17,7 +17,7 @@ import speech_recognition as sr
 # --- Configuración ---
 # Ruta al script que manda el video al servidor de detección.
 # Ajusta la ruta si send_feed.py está en otra carpeta.
-SEND_FEED_SCRIPT = "sketches/Proyecto-de-titulo-Robotica/stepper-pan/send_feed.py"
+SEND_FEED_SCRIPT = "stepper-pan/send_feed.py"
 
 TRIGGER_PHRASES = [
     "busca el baston",
