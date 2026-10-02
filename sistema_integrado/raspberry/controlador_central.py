@@ -1,21 +1,19 @@
 """
-controlador_central.py - Cerebro Maestro en Raspberry Pi
+controlador_central.py - Cerebro Maestro en Raspberry Pi (Con Autodiagnóstico Modular)
 
-Este script coordina todo el sistema según los requerimientos:
-1. Escucha por micrófono el comando de voz "¿Dónde está la mochila?" para iniciar la búsqueda.
-2. Sigue el circuito de cinta leyendo el Arduino de Sensores (Línea + Ultrasonido).
-3. Envía frames de la cámara al servidor remoto Flask (remote_yolo_script.py / yolo8n_mochilas.pt).
-4. Cuando YOLO detecta una 'mochila':
-   - Centra la cámara con el motor de pasos (T<steps>).
-   - Gira el chasis ('a' o 'd') para alinearse de frente a la mochila.
-   - Avanza ('w') hacia la mochila.
-5. Monitorea el sensor ultrasónico desde el Arduino de Sensores:
-   - Al confirmar distancia <= 10 cm:
-     - Frena los motores (' ').
-     - Emite el sonido de alerta por el altavoz conectado a la Raspberry Pi.
-6. Espera la confirmación por voz ("listo" o "para"):
-   - Retrocede ('s') hasta que los sensores de línea detecten la cinta predefinida.
-   - Realiza contragiro para recuperar la orientación del circuito y continúa.
+Funcionalidad:
+1. Autodiagnóstico modular de inicio: prueba individualmente micrófono, parlante, cámara,
+   Arduinos y servidor YOLO. Muestra un dashboard claro en la terminal SSH.
+2. Alerta 1 sola vez si un componente no es detectado o se desconecta en caliente.
+3. Modo tolerante a fallos: permite probar el sistema aunque no todos los periféricos estén conectados.
+4. Coordina:
+   - Búsqueda por voz ("¿Dónde está la mochila?") o teclado ('b').
+   - Seguimiento de línea por cinta con Arduino Sensores.
+   - Detección de 'mochila' vía servidor Flask remoto (remote_yolo_script.py / yolo8n_mochilas.pt).
+   - Centrado con motor de pasos (T<steps>) y alineación de chasis ('a'/'d').
+   - Aproximación hasta 10 cm con ultrasonido y frenado en seco (' ').
+   - Alerta sonora por parlante Bluetooth (meme del pájaro gritando).
+   - Retorno por voz ("listo"/"para") en reversa recta ('s') y realineación.
 """
 
 import cv2
@@ -23,30 +21,42 @@ import requests
 import serial
 import time
 import threading
+import subprocess
+import os
 import sys
+import ctypes
+import glob
 import speech_recognition as sr
-from alert_sound import sonar_alerta
+from alert_sound import sonar_alerta, MAC_PARLANTE
+
+# Silenciar mensajes internos de advertencia de ALSA/JACK
+ERROR_HANDLER_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p)
+def py_error_handler(filename, line, function, err, fmt):
+    pass
+c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
+try:
+    asound = ctypes.cdll.LoadLibrary('libasound.so.2')
+    asound.snd_lib_error_set_handler(c_error_handler)
+except Exception:
+    pass
 
 # ==========================================
 # CONFIGURACIÓN GENERAL
 # ==========================================
 SERVER_URL = 'http://100.64.158.87:5000/detect'  # Servidor Flask con yolo8n_mochilas.pt
 
-# Puertos Seriales USB de la Raspberry Pi hacia los 2 Arduinos
 PUERTO_SENSORES = '/dev/ttyACM0'  # Arduino Sensores (Línea + Ultrasonido)
 BAUD_SENSORES   = 115200
 
 PUERTO_MOTORES  = '/dev/ttyUSB0'  # Arduino Motores + Stepper Cámara
 BAUD_MOTORES    = 9600
 
-# Parámetros de detección y alineación
-CLASE_OBJETIVO        = 'mochila' # o 'backpack'
+CLASE_OBJETIVO        = 'mochila'
 ANCHO_IMAGEN          = 640
 CENTRO_X_OBJETIVO     = 320
-MARGEN_CENTRO_PX      = 45        # Tolerancia en píxeles para considerar centrado
-DISTANCIA_OBJETIVO_CM = 10        # Distancia de frenado ultrasónico
+MARGEN_CENTRO_PX      = 45
+DISTANCIA_OBJETIVO_CM = 10
 
-# Frases de activación y detención
 TRIGGER_VOZ_BUSCAR = [
     "donde esta la mochila",
     "dónde está la mochila",
@@ -67,7 +77,7 @@ TRIGGER_VOZ_RETORNO = [
 ]
 
 # ==========================================
-# VARIABLES GLOBALES DE ESTADO
+# ESTADOS DEL SISTEMA
 # ==========================================
 class EstadoSistema:
     REPOSO               = "REPOSO"
@@ -79,67 +89,178 @@ class EstadoSistema:
 
 estado_actual = EstadoSistema.REPOSO
 
-# Telemetría de sensores (Arduino Sensores)
+# Telemetría de sensores
 distancia_frente = 999
 linea_izq        = 0
 linea_cen        = 0
 linea_der        = 0
 
-# Memoria de maniobra para retorno
+# Variables de maniobra
 direccion_giro_inicial = ' '
 tiempo_giro_ms         = 450
 tiempo_avance_inicio   = 0
 tiempo_avance_total    = 0
 
-# Conexiones seriales
+# Puertos seriales y control
 ser_sensores = None
 ser_motores  = None
 running = True
 
-# ==========================================
-# INICIALIZACIÓN DE CONEXIONES SERIALES
-# ==========================================
-def conectar_arduinos():
-    global ser_sensores, ser_motores
-    try:
-        ser_sensores = serial.Serial(PUERTO_SENSORES, BAUD_SENSORES, timeout=0.1)
-        print(f"[OK] Conectado a Arduino Sensores en {PUERTO_SENSORES}")
-    except Exception as e:
-        print(f"[AVISO] No se pudo conectar a Arduino Sensores ({e}).")
+# Banderas de estado de hardware
+hw_mic_ok       = False
+hw_parlante_ok  = False
+hw_camara_ok    = False
+hw_sensores_ok  = False
+hw_motores_ok   = False
+hw_servidor_ok  = False
 
-    try:
-        ser_motores = serial.Serial(PUERTO_MOTORES, BAUD_MOTORES, timeout=0.1)
-        print(f"[OK] Conectado a Arduino Motores en {PUERTO_MOTORES}")
-    except Exception as e:
-        print(f"[AVISO] No se pudo conectar a Arduino Motores ({e}).")
+# Banderas para avisar 1 sola vez en desconexión
+alerta_camara_mostrada   = False
+alerta_servidor_mostrada = False
+alerta_motores_mostrada  = False
+alerta_sensores_mostrada = False
 
+# ==========================================
+# DIAGNÓSTICO MODULAR DE HARDWARE
+# ==========================================
+def test_microfono():
+    try:
+        mics = sr.Microphone.list_microphone_names()
+        if mics:
+            return True, f"Conectado ({len(mics)} disp.)"
+        return False, "No detectado"
+    except Exception as e:
+        return False, f"Error: {e}"
+
+def test_parlante():
+    try:
+        res = subprocess.run(["bluetoothctl", "info", MAC_PARLANTE], capture_output=True, text=True, timeout=2)
+        if "Connected: yes" in res.stdout:
+            return True, f"Conectado ({MAC_PARLANTE})"
+        # Intentar reconexión rápida de cortesía
+        subprocess.run(["bluetoothctl", "connect", MAC_PARLANTE], capture_output=True, timeout=3)
+        res2 = subprocess.run(["bluetoothctl", "info", MAC_PARLANTE], capture_output=True, text=True, timeout=2)
+        if "Connected: yes" in res2.stdout:
+            return True, f"Reconectado ({MAC_PARLANTE})"
+        return False, f"Desconectado ({MAC_PARLANTE})"
+    except Exception as e:
+        return False, f"Error: {e}"
+
+def test_camara():
+    try:
+        cap_test = cv2.VideoCapture(0)
+        if cap_test.isOpened():
+            ret, _ = cap_test.read()
+            cap_test.release()
+            if ret:
+                return True, "Conectada (/dev/video0)"
+            return False, "Detectada pero sin señal de video"
+        return False, "No detectada (/dev/video0)"
+    except Exception as e:
+        return False, f"Error: {e}"
+
+def test_arduino_sensores():
+    global ser_sensores
+    puertos = [PUERTO_SENSORES] + glob.glob('/dev/ttyACM*')
+    puertos = list(dict.fromkeys(puertos))
+    for p in puertos:
+        try:
+            ser_sensores = serial.Serial(p, BAUD_SENSORES, timeout=0.1)
+            return True, f"Conectado en {p}"
+        except Exception:
+            pass
+    ser_sensores = None
+    return False, f"No detectado en {PUERTO_SENSORES}"
+
+def test_arduino_motores():
+    global ser_motores
+    puertos = [PUERTO_MOTORES] + glob.glob('/dev/ttyUSB*')
+    puertos = list(dict.fromkeys(puertos))
+    for p in puertos:
+        try:
+            ser_motores = serial.Serial(p, BAUD_MOTORES, timeout=0.1)
+            return True, f"Conectado en {p}"
+        except Exception:
+            pass
+    ser_motores = None
+    return False, f"No detectado en {PUERTO_MOTORES}"
+
+def test_servidor_yolo():
+    try:
+        requests.get(SERVER_URL.replace('/detect', ''), timeout=1.5)
+        return True, f"En línea ({SERVER_URL})"
+    except Exception:
+        try:
+            requests.post(SERVER_URL, timeout=1.5)
+            return True, f"En línea ({SERVER_URL})"
+        except Exception:
+            return False, f"Sin respuesta ({SERVER_URL})"
+
+def autodiagnostico_hardware():
+    global hw_mic_ok, hw_parlante_ok, hw_camara_ok, hw_sensores_ok, hw_motores_ok, hw_servidor_ok
+
+    print("\n" + "="*62)
+    print("         AUTODIAGNÓSTICO MODULAR DEL SISTEMA (NAVBOT)         ")
+    print("="*62)
+
+    hw_mic_ok, msg_mic           = test_microfono()
+    hw_parlante_ok, msg_parlante = test_parlante()
+    hw_camara_ok, msg_camara     = test_camara()
+    hw_sensores_ok, msg_sensores = test_arduino_sensores()
+    hw_motores_ok, msg_motores   = test_arduino_motores()
+    hw_servidor_ok, msg_servidor = test_servidor_yolo()
+
+    print(f" [{'✅' if hw_mic_ok else '❌'}] MICRÓFONO USB       : {msg_mic}")
+    print(f" [{'✅' if hw_parlante_ok else '❌'}] PARLANTE BLUETOOTH  : {msg_parlante}")
+    print(f" [{'✅' if hw_camara_ok else '❌'}] CÁMARA USB          : {msg_camara}")
+    print(f" [{'✅' if hw_sensores_ok else '❌'}] ARDUINO SENSORES    : {msg_sensores}")
+    print(f" [{'✅' if hw_motores_ok else '❌'}] ARDUINO MOTORES     : {msg_motores}")
+    print(f" [{'✅' if hw_servidor_ok else '⚠️'}] SERVIDOR YOLO       : {msg_servidor}")
+    print("="*62)
+
+    # Mensajes explicativos según qué falte
+    if not hw_mic_ok:
+        print(">> [AVISO] Comandos de voz desactivados. Usa comandos por teclado.")
+    if not hw_camara_ok:
+        print(">> [AVISO] Cámara no detectada. La detección visual esperará conexión.")
+    if not hw_sensores_ok or not hw_motores_ok:
+        print(">> [AVISO] Arduinos no conectados. Órdenes se ejecutarán en modo simulación.")
+    print(">> Sistema listo. Presiona 'b' para buscar, 'r' para retornar, 'q' para salir.\n")
+
+# ==========================================
+# ENVÍO SEGURO DE COMANDOS A MOTORES
+# ==========================================
 def enviar_motor(cmd):
-    """Envía un comando de movimiento ('w','s','a','d',' ') al Arduino de motores."""
+    global alerta_motores_mostrada
     if ser_motores and ser_motores.is_open:
         try:
             ser_motores.write(cmd.encode())
-        except Exception as e:
-            print(f"Error enviando comando '{cmd}' a motores: {e}")
+            alerta_motores_mostrada = False
+        except Exception:
+            if not alerta_motores_mostrada:
+                print("⚠️ [ALERTA] Se perdió la comunicación con Arduino Motores.")
+                alerta_motores_mostrada = True
+    else:
+        # Modo simulación silenciosa
+        pass
 
 def mover_stepper(steps):
-    """Envía un comando de pasos T<steps> al motor de paneo de la cámara."""
     if ser_motores and ser_motores.is_open and steps != 0:
         try:
             ser_motores.write(f"T{steps}\n".encode())
-        except Exception as e:
-            print(f"Error enviando T{steps} a stepper: {e}")
+        except Exception:
+            pass
 
 # ==========================================
 # HILO 1: LECTURA DE ARDUINO SENSORES
 # ==========================================
 def hilo_lectura_sensores():
-    global distancia_frente, linea_izq, linea_cen, linea_der, running
+    global distancia_frente, linea_izq, linea_cen, linea_der, running, alerta_sensores_mostrada
     while running:
         if ser_sensores and ser_sensores.is_open:
             try:
                 linea = ser_sensores.readline().decode('utf-8', errors='ignore').strip()
                 if linea.startswith("TLM:"):
-                    # Formato: TLM:<dist>,<I>,<C>,<D>
                     partes = linea[4:].split(',')
                     if len(partes) == 4:
                         distancia_frente = int(partes[0])
@@ -148,8 +269,11 @@ def hilo_lectura_sensores():
                         linea_der        = int(partes[3])
                 elif "EVT:OBJETIVO_10CM" in linea and estado_actual != EstadoSistema.EN_OBJETIVO_SONIDO:
                     notificar_llegada_mochila()
+                alerta_sensores_mostrada = False
             except Exception:
-                pass
+                if not alerta_sensores_mostrada:
+                    print("⚠️ [ALERTA] Se interrumpió la lectura de Arduino Sensores.")
+                    alerta_sensores_mostrada = True
         time.sleep(0.02)
 
 # ==========================================
@@ -157,14 +281,16 @@ def hilo_lectura_sensores():
 # ==========================================
 def hilo_reconocimiento_voz():
     global estado_actual, running
+    if not hw_mic_ok:
+        return
+
     recognizer = sr.Recognizer()
     try:
         mic = sr.Microphone()
-    except Exception as e:
-        print(f"[AVISO] Micrófono no disponible ({e}). Usar comandos de teclado.")
+    except Exception:
         return
 
-    print(">> [VOZ] Micrófono listo. Di '¿Dónde está la mochila?' para iniciar.")
+    print(">> [VOZ] Escuchando continuamente por el micrófono...")
 
     while running:
         if estado_actual in [EstadoSistema.REPOSO, EstadoSistema.EN_OBJETIVO_SONIDO]:
@@ -193,7 +319,35 @@ def hilo_reconocimiento_voz():
             time.sleep(0.5)
 
 # ==========================================
-# LÓGICA DE NAVEGACIÓN Y ACCIÓN
+# HILO 3: ENTRADA POR TECLADO (FALLBACK SSH)
+# ==========================================
+def hilo_teclado():
+    global estado_actual, running
+    while running:
+        try:
+            line = sys.stdin.readline()
+            if not line:
+                break
+            cmd = line.strip().lower()
+            if cmd == 'b':
+                print("\n⌨️ [TECLADO] Comando 'b': Iniciando búsqueda de la mochila...")
+                estado_actual = EstadoSistema.SEGUIR_PISTA
+            elif cmd == 'r':
+                print("\n⌨️ [TECLADO] Comando 'r': Iniciando retorno a la pista...")
+                iniciar_retorno_a_pista()
+            elif cmd == ' ':
+                print("\n⌨️ [TECLADO] Freno manual activado.")
+                enviar_motor(' ')
+                estado_actual = EstadoSistema.REPOSO
+            elif cmd == 'q':
+                print("\n⌨️ [TECLADO] Cerrando sistema...")
+                running = False
+                break
+        except Exception:
+            break
+
+# ==========================================
+# LÓGICA DE NAVEGACIÓN Y SONIDO
 # ==========================================
 def notificar_llegada_mochila():
     global estado_actual, tiempo_avance_total
@@ -204,7 +358,7 @@ def notificar_llegada_mochila():
     print(f"🎯 ¡MOCHILA ALCANZADA! Distancia: {distancia_frente} cm")
     print(f"==========================================")
     sonar_alerta()
-    print(">> Esperando comando de voz: 'listo' o 'para' para volver al circuito...")
+    print(">> Esperando comando de voz ('listo' / 'para') o tecla 'r'...")
 
 def iniciar_retorno_a_pista():
     global estado_actual
@@ -213,13 +367,12 @@ def iniciar_retorno_a_pista():
 
 def ejecutar_maniobra_retorno():
     global estado_actual
-    print(">> [RETORNO] Retrocediendo hacia la cinta...")
-    enviar_motor('s')  # Reversa recta
+    print(">> [RETORNO] Retrocediendo hacia la cinta predefinida...")
+    enviar_motor('s')
 
     t_inicio_rev = time.time()
     tiempo_max_rev = (tiempo_avance_total if tiempo_avance_total > 0 else 3.0) + 2.0
 
-    # Esperar hasta que los sensores de línea toquen la cinta
     while time.time() - t_inicio_rev < tiempo_max_rev:
         if linea_izq or linea_cen or linea_der:
             print(">> [RETORNO] ¡Cinta detectada! Frenando reversa.")
@@ -230,7 +383,6 @@ def ejecutar_maniobra_retorno():
     enviar_motor(' ')
     time.sleep(0.2)
 
-    # Contragiro opuesto para alinearse en el sentido de la pista
     if direccion_giro_inicial == 'a':
         print(">> [RETORNO] Contragiro a la DERECHA para alinearse con el circuito...")
         enviar_motor('d')
@@ -245,7 +397,6 @@ def ejecutar_maniobra_retorno():
     estado_actual = EstadoSistema.SEGUIR_PISTA
 
 def ejecutar_seguimiento_linea():
-    """Lógica estándar de seguimiento con 3 sensores TCRT5000."""
     if linea_cen and not linea_izq and not linea_der:
         enviar_motor('w')
     elif linea_izq and not linea_der:
@@ -262,46 +413,59 @@ def ejecutar_seguimiento_linea():
 # ==========================================
 def main():
     global estado_actual, running, direccion_giro_inicial, tiempo_avance_inicio
+    global alerta_camara_mostrada, alerta_servidor_mostrada
 
-    conectar_arduinos()
+    # 1. Autodiagnóstico modular de inicio
+    autodiagnostico_hardware()
 
-    # Iniciar hilos auxiliares
+    # 2. Iniciar hilos auxiliares
     threading.Thread(target=hilo_lectura_sensores, daemon=True).start()
     threading.Thread(target=hilo_reconocimiento_voz, daemon=True).start()
+    threading.Thread(target=hilo_teclado, daemon=True).start()
 
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, ANCHO_IMAGEN)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-
-    print("\n==============================================")
-    print("   CONTROLADOR CENTRAL NAVBOT (RASPBERRY PI)  ")
-    print("==============================================")
-    print("Estado inicial: REPOSO.")
-    print("Para iniciar, di '¿Dónde está la mochila?' o presiona 'b' en consola.\n")
-
+    cap = None
     frame_counter = 0
 
     try:
         while running:
-            # 1. Modo Reposo: espera activación
+            # En reposo: espera inicio por voz o teclado
             if estado_actual == EstadoSistema.REPOSO:
                 enviar_motor(' ')
                 time.sleep(0.1)
                 continue
 
-            # 2. Captura de frame de la webcam
+            # Gestión de apertura de cámara bajo demanda
+            if cap is None or not cap.isOpened():
+                cap = cv2.VideoCapture(0)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, ANCHO_IMAGEN)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                if not cap.isOpened():
+                    if not alerta_camara_mostrada:
+                        print("❌ [ALERTA] No se detecta cámara conectada. Reintentando...")
+                        alerta_camara_mostrada = True
+                    time.sleep(1.0)
+                    continue
+                else:
+                    if alerta_camara_mostrada:
+                        print("✅ [INFO] Cámara USB conectada y activa.")
+                        alerta_camara_mostrada = False
+
             ret, frame = cap.read()
             if not ret:
-                time.sleep(0.05)
+                if not alerta_camara_mostrada:
+                    print("❌ [ALERTA] La cámara no entregó imagen. Reintentando...")
+                    alerta_camara_mostrada = True
+                time.sleep(0.5)
                 continue
+            else:
+                alerta_camara_mostrada = False
 
             frame_counter += 1
 
-            # 3. Modo Seguimiento normal de pista (busca mientras avanza por cinta)
             if estado_actual == EstadoSistema.SEGUIR_PISTA:
                 ejecutar_seguimiento_linea()
 
-            # Enviar 1 de cada 4 frames al servidor YOLO para no saturar la red
+            # Procesamiento con servidor YOLO (1 de cada 4 frames)
             if frame_counter % 4 == 0 and estado_actual in [EstadoSistema.SEGUIR_PISTA, EstadoSistema.ALINEANDO_MOCHILA, EstadoSistema.AVANZANDO_A_MOCHILA]:
                 _, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
 
@@ -309,14 +473,13 @@ def main():
                     res = requests.post(
                         SERVER_URL,
                         files={'image': ('frame.jpg', encoded.tobytes(), 'image/jpeg')},
-                        timeout=3
+                        timeout=2.5
                     )
                     data = res.json()
+                    alerta_servidor_mostrada = False
 
-                    # Compatibilidad con lista directa [{'label':..., 'center_x':...}] o dict
                     detecciones = data if isinstance(data, list) else data.get('detections', [])
 
-                    # Buscar mochila en las detecciones
                     mochila = None
                     for d in detecciones:
                         label = d.get('label', '').lower()
@@ -330,11 +493,9 @@ def main():
 
                         print(f"🎯 Mochila detectada en x={center_x} (Error={error_x}px)")
 
-                        # Mover stepper de cámara para mantenerla centrada
                         steps_stepper = int(error_x * 0.12)
                         mover_stepper(steps_stepper)
 
-                        # ALINEACIÓN Y APROXIMACIÓN DEL ROBOT
                         if abs(error_x) > MARGEN_CENTRO_PX:
                             estado_actual = EstadoSistema.ALINEANDO_MOCHILA
                             if error_x < 0:
@@ -346,19 +507,18 @@ def main():
                                 enviar_motor('d')
                                 direccion_giro_inicial = 'd'
                         else:
-                            # Mochila centrada: avanzar directamente hacia ella
                             if estado_actual != EstadoSistema.AVANZANDO_A_MOCHILA:
                                 estado_actual = EstadoSistema.AVANZANDO_A_MOCHILA
                                 tiempo_avance_inicio = time.time()
                                 print(">> Mochila centrada. Avanzando de frente ('w')...")
-                            
                             enviar_motor('w')
 
-                except Exception as e:
-                    # En caso de caída de conexión con el servidor YOLO, mantener seguimiento
-                    pass
+                except Exception:
+                    if not alerta_servidor_mostrada:
+                        print(f"⚠️ [ALERTA] Servidor YOLO no responde en {SERVER_URL}.")
+                        alerta_servidor_mostrada = True
 
-            # 4. Verificación de proximidad ultrasónica cuando va hacia la mochila
+            # Detección ultrasónica de proximidad
             if estado_actual == EstadoSistema.AVANZANDO_A_MOCHILA:
                 if 0 < distancia_frente <= DISTANCIA_OBJETIVO_CM:
                     notificar_llegada_mochila()
@@ -370,7 +530,7 @@ def main():
     finally:
         running = False
         enviar_motor(' ')
-        cap.release()
+        if cap: cap.release()
         if ser_sensores: ser_sensores.close()
         if ser_motores: ser_motores.close()
 
