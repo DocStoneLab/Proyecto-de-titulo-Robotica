@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <Stepper.h>
-#include <SoftwareSerial.h>
 #include <ctype.h>
 
 // ── PUENTES H MOTORES DC (Tracción 4WD) ──
@@ -27,10 +26,6 @@ int  panDirection = -1;
 int  currentPos   = 0; // Posición actual en pasos (-512 a +512)
 
 String inputBuffer = "";
-
-// ── ENLACE SERIAL CON ARDUINO CEREBRO ──
-// RX=A0 (Conectar al pin 3 TX de Cerebro), TX=A1
-SoftwareSerial serialCerebro(A0, A1);
 
 // ── FUNCIONES DE MOTORES DC ──
 void actualizarMotores(bool m1a, bool m1b, bool m2a, bool m2b, bool m3a, bool m3b, bool m4a, bool m4b) {
@@ -166,8 +161,7 @@ void ejecutarComandoSimple(char c) {
 
 // ── SETUP ──
 void setup() {
-  Serial.begin(9600);        // UART Hardware hacia Raspberry Pi (USB)
-  serialCerebro.begin(9600); // UART Software hacia Arduino Cerebro (Pin A0)
+  Serial.begin(9600); // UART Hardware hacia Raspberry Pi (USB)
 
   const int pinesMotores[] = {M1_A, M1_B, M2_A, M2_B, M3_A, M3_B, M4_A, M4_B};
   for (int i = 0; i < 8; i++) pinMode(pinesMotores[i], OUTPUT);
@@ -177,12 +171,12 @@ void setup() {
 
   Serial.println(F("Iniciando Arduino Motores y Stepper..."));
   goHome();
-  Serial.println(F("Listo para recibir comandos."));
+  Serial.println(F("Listo para recibir comandos desde Raspberry Pi (USB)."));
 }
 
 // ── LOOP ──
 void loop() {
-  // 1. Lectura desde Raspberry Pi (USB Serial)
+  // Lectura directa desde Raspberry Pi por USB Serial
   while (Serial.available()) {
     char c = Serial.read();
 
@@ -208,12 +202,6 @@ void loop() {
     ejecutarComandoSimple(c);
   }
 
-  // 2. Lectura directa desde Arduino Cerebro (Navegación FSM)
-  while (serialCerebro.available()) {
-    char cmdCerebro = serialCerebro.read();
-    procesarComando(cmdCerebro);
-  }
-
-  // 3. Paneo automático si está activo
+  // Paneo automático si está activo
   if (autoPan) runAutoPan();
 }
