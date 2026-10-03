@@ -101,6 +101,14 @@ TRIGGER_VOZ_RETORNO = [
     "detener",
 ]
 
+TRIGGER_VOZ_PARAR = [
+    "stop",
+    "alto",
+    "frena",
+    "cancela",
+    "cancelar",
+]
+
 # ==========================================
 # ESTADOS DEL SISTEMA
 # ==========================================
@@ -318,40 +326,57 @@ def hilo_reconocimiento_voz():
 
     with suprimir_salida_c():
         recognizer = sr.Recognizer()
+        recognizer.dynamic_energy_threshold = True
         try:
             mic = sr.Microphone()
+            with mic as source:
+                recognizer.adjust_for_ambient_noise(source, duration=0.8)
         except Exception:
             return
 
     print(">> [VOZ] Escuchando continuamente por el micrófono...")
 
     while running:
-        if estado_actual in [EstadoSistema.REPOSO, EstadoSistema.EN_OBJETIVO_SONIDO]:
-            try:
-                with suprimir_salida_c():
-                    with mic as source:
-                        recognizer.adjust_for_ambient_noise(source, duration=0.3)
-                        audio = recognizer.listen(source, phrase_time_limit=4)
-                    texto = recognizer.recognize_google(audio, language="es-CL").lower()
-                
-                print(f">> [VOZ ESCUCHADA]: \"{texto}\"")
+        # Durante la maniobra de retorno a la cinta se pausa brevemente la escucha
+        if estado_actual == EstadoSistema.RETORNO_A_PISTA:
+            time.sleep(0.3)
+            continue
 
-                if estado_actual == EstadoSistema.REPOSO:
-                    if any(frase in texto for frase in TRIGGER_VOZ_BUSCAR):
-                        print("\n🚀 [VOZ] Comando recibido.")
-                        iniciar_busqueda()
+        try:
+            with suprimir_salida_c():
+                with mic as source:
+                    audio = recognizer.listen(source, timeout=2.5, phrase_time_limit=3.5)
+                texto = recognizer.recognize_google(audio, language="es-CL").lower()
+            
+            print(f">> [VOZ ESCUCHADA]: \"{texto}\"")
 
-                elif estado_actual == EstadoSistema.EN_OBJETIVO_SONIDO:
-                    if any(frase in texto for frase in TRIGGER_VOZ_RETORNO):
-                        print("\n🔄 [VOZ] Comando 'Listo/Para' recibido. Iniciando retorno a la pista...")
-                        iniciar_retorno_a_pista()
+            # 1. En reposo: escuchar orden para iniciar la búsqueda
+            if estado_actual == EstadoSistema.REPOSO:
+                if any(frase in texto for frase in TRIGGER_VOZ_BUSCAR):
+                    print("\n🚀 [VOZ] Comando de búsqueda recibido.")
+                    iniciar_busqueda()
 
-            except sr.UnknownValueError:
-                pass
-            except Exception:
-                pass
-        else:
-            time.sleep(0.5)
+            # 2. En cualquier momento de la búsqueda o en el objetivo: escuchar 'listo', 'para', 'stop'
+            elif estado_actual in [
+                EstadoSistema.SEGUIR_PISTA,
+                EstadoSistema.ALINEANDO_MOCHILA,
+                EstadoSistema.AVANZANDO_A_MOCHILA,
+                EstadoSistema.EN_OBJETIVO_SONIDO
+            ]:
+                if any(frase in texto for frase in TRIGGER_VOZ_PARAR):
+                    print("\n🛑 [VOZ] Comando de parada ('stop/alto') recibido. Frenando robot...")
+                    enviar_motor(' ')
+                    estado_actual = EstadoSistema.REPOSO
+                elif any(frase in texto for frase in TRIGGER_VOZ_RETORNO):
+                    print("\n🔄 [VOZ] Comando 'Listo/Retorno' recibido. Iniciando retorno a la pista...")
+                    iniciar_retorno_a_pista()
+
+        except sr.WaitTimeoutError:
+            pass
+        except sr.UnknownValueError:
+            pass
+        except Exception:
+            pass
 
 # ==========================================
 # HILO 3: ENTRADA POR TECLADO (FALLBACK SSH)
