@@ -29,7 +29,7 @@ import ctypes
 import contextlib
 import glob
 import speech_recognition as sr
-from alert_sound import sonar_alerta, MAC_PARLANTE
+from alert_sound import sonar_alerta, sonar_conexion, MAC_PARLANTE
 
 # ==========================================
 # SUPRESOR DE MENSAJES C (ALSA / JACK / PyAudio)
@@ -302,6 +302,14 @@ def hilo_lectura_sensores():
 
 # ==========================================
 # HILO 2: RECONOCIMIENTO DE VOZ
+def iniciar_busqueda():
+    global estado_actual
+    print("\n🚀 [INICIO] Iniciando búsqueda de la mochila y reproduciendo sonido de conexión...")
+    threading.Thread(target=sonar_conexion, daemon=True).start()
+    estado_actual = EstadoSistema.SEGUIR_PISTA
+
+# ==========================================
+# HILO 2: RECONOCIMIENTO DE VOZ CONTINUO
 # ==========================================
 def hilo_reconocimiento_voz():
     global estado_actual, running
@@ -330,8 +338,8 @@ def hilo_reconocimiento_voz():
 
                 if estado_actual == EstadoSistema.REPOSO:
                     if any(frase in texto for frase in TRIGGER_VOZ_BUSCAR):
-                        print("\n🚀 [VOZ] Comando recibido: Iniciando búsqueda de la mochila...")
-                        estado_actual = EstadoSistema.SEGUIR_PISTA
+                        print("\n🚀 [VOZ] Comando recibido.")
+                        iniciar_busqueda()
 
                 elif estado_actual == EstadoSistema.EN_OBJETIVO_SONIDO:
                     if any(frase in texto for frase in TRIGGER_VOZ_RETORNO):
@@ -357,8 +365,8 @@ def hilo_teclado():
                 break
             cmd = line.strip().lower()
             if cmd == 'b':
-                print("\n⌨️ [TECLADO] Comando 'b': Iniciando búsqueda de la mochila...")
-                estado_actual = EstadoSistema.SEGUIR_PISTA
+                print("\n⌨️ [TECLADO] Comando 'b' recibido.")
+                iniciar_busqueda()
             elif cmd == 'r':
                 print("\n⌨️ [TECLADO] Comando 'r': Iniciando retorno a la pista...")
                 iniciar_retorno_a_pista()
