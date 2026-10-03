@@ -14,26 +14,7 @@ def obtener_carpeta_audios():
     Retorna la ruta absoluta de la carpeta 'Audios' ubicada en la raíz del proyecto.
     Soporta la estructura habitual en la Raspberry Pi y entornos de ejecución.
     """
-    # alert_sound.py está en: <raiz>/sistema_integrado/raspberry/alert_sound.py
-    dir_actual = os.path.dirname(os.path.abspath(__file__))
-    dir_raiz = os.path.abspath(os.path.join(dir_actual, "..", ".."))
-
-    posibles_rutas = [
-        os.path.join(dir_raiz, "Audios"),
-        os.path.join(dir_raiz, "audios"),
-        os.path.expanduser("~/sketches/Proyecto-de-titulo-Robotica/Audios"),
-        os.path.expanduser("~/sketches/Proyecto-de-titulo-Robotica/audios"),
-        os.path.expanduser("~/Projects/Proyecto-de-titulo-Robotica/Audios"),
-        os.path.expanduser("~/Projects/Proyecto-de-titulo-Robotica/audios"),
-        os.path.expanduser("~/Audios"),
-        os.path.expanduser("~/audios"),
-    ]
-
-    for ruta in posibles_rutas:
-        if os.path.isdir(ruta):
-            return ruta
-
-    return os.path.join(dir_raiz, "Audios")
+    return os.path.expanduser("~/sketches/Proyecto-de-titulo-Robotica/Audios")
 
 def asegurar_conexion_bluetooth():
     """Verifica si el parlante está conectado y, si no lo está, lo conecta automáticamente."""
