@@ -4,12 +4,13 @@ controlador_central.py - Cerebro Maestro en Raspberry Pi (Con Autodiagnóstico M
 Funcionalidad:
 1. Autodiagnóstico modular de inicio: prueba individualmente micrófono, parlante, cámara,
    Arduinos y servidor YOLO. Muestra un dashboard claro en la terminal SSH.
-2. Alerta 1 sola vez si un componente no es detectado o se desconecta en caliente.
-3. Modo tolerante a fallos: permite probar el sistema aunque no todos los periféricos estén conectados.
-4. Coordina:
+2. Silencia 100% las advertencias internas de ALSA y JACK a nivel de C.
+3. Alerta 1 sola vez si un componente no es detectado o se desconecta en caliente.
+4. Modo tolerante a fallos: permite probar el sistema aunque no todos los periféricos estén conectados.
+5. Coordina:
    - Búsqueda por voz ("¿Dónde está la mochila?") o teclado ('b').
    - Seguimiento de línea por cinta con Arduino Sensores.
-   - Detección de 'mochila' vía servidor Flask remoto (remote_yolo_script.py / yolo8n_mochilas.pt).
+   - Detección de 'mochila' vía servidor Flask remoto (192.168.100.89:5000).
    - Centrado con motor de pasos (T<steps>) y alineación de chasis ('a'/'d').
    - Aproximación hasta 10 cm con ultrasonido y frenado en seco (' ').
    - Alerta sonora por parlante Bluetooth (meme del pájaro gritando).
@@ -25,16 +26,39 @@ import subprocess
 import os
 import sys
 import ctypes
+import contextlib
 import glob
 import speech_recognition as sr
 from alert_sound import sonar_alerta, MAC_PARLANTE
 
-# Silenciar mensajes internos de advertencia de ALSA/JACK
-ERROR_HANDLER_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p)
-def py_error_handler(filename, line, function, err, fmt):
-    pass
-c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
+# ==========================================
+# SUPRESOR DE MENSAJES C (ALSA / JACK / PyAudio)
+# ==========================================
+@contextlib.contextmanager
+def suprimir_salida_c():
+    """Redirige temporalmente stderr (descriptor 2) a /dev/null para silenciar JACK y ALSA."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        old_stderr = os.dup(2)
+        sys.stderr.flush()
+        os.dup2(devnull, 2)
+        os.close(devnull)
+        yield
+    except Exception:
+        yield
+    finally:
+        try:
+            sys.stderr.flush()
+            os.dup2(old_stderr, 2)
+            os.close(old_stderr)
+        except Exception:
+            pass
+
+# Silenciador auxiliar de ALSA
 try:
+    ERROR_HANDLER_FUNC = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p)
+    def py_error_handler(filename, line, function, err, fmt): pass
+    c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
     asound = ctypes.cdll.LoadLibrary('libasound.so.2')
     asound.snd_lib_error_set_handler(c_error_handler)
 except Exception:
@@ -43,7 +67,8 @@ except Exception:
 # ==========================================
 # CONFIGURACIÓN GENERAL
 # ==========================================
-SERVER_URL = 'http://100.64.158.87:5000/detect'  # Servidor Flask con yolo8n_mochilas.pt
+# IP de tu PC donde corre remote_yolo_script.py
+SERVER_URL = 'http://192.168.100.89:5000/detect'
 
 PUERTO_SENSORES = '/dev/ttyACM0'  # Arduino Sensores (Línea + Ultrasonido)
 BAUD_SENSORES   = 115200
@@ -124,20 +149,20 @@ alerta_sensores_mostrada = False
 # DIAGNÓSTICO MODULAR DE HARDWARE
 # ==========================================
 def test_microfono():
-    try:
-        mics = sr.Microphone.list_microphone_names()
-        if mics:
-            return True, f"Conectado ({len(mics)} disp.)"
-        return False, "No detectado"
-    except Exception as e:
-        return False, f"Error: {e}"
+    with suprimir_salida_c():
+        try:
+            mics = sr.Microphone.list_microphone_names()
+            if mics:
+                return True, f"Conectado ({len(mics)} disp.)"
+            return False, "No detectado"
+        except Exception as e:
+            return False, f"Error: {e}"
 
 def test_parlante():
     try:
         res = subprocess.run(["bluetoothctl", "info", MAC_PARLANTE], capture_output=True, text=True, timeout=2)
         if "Connected: yes" in res.stdout:
             return True, f"Conectado ({MAC_PARLANTE})"
-        # Intentar reconexión rápida de cortesía
         subprocess.run(["bluetoothctl", "connect", MAC_PARLANTE], capture_output=True, timeout=3)
         res2 = subprocess.run(["bluetoothctl", "info", MAC_PARLANTE], capture_output=True, text=True, timeout=2)
         if "Connected: yes" in res2.stdout:
@@ -187,14 +212,17 @@ def test_arduino_motores():
 
 def test_servidor_yolo():
     try:
-        requests.get(SERVER_URL.replace('/detect', ''), timeout=1.5)
+        # Intentar conectar con la ruta raíz o /detect con timeout corto
+        res = requests.get('http://192.168.100.89:5000/', timeout=1.5)
+        if res.status_code in [200, 404]:
+            return True, f"En línea (http://192.168.100.89:5000)"
+    except Exception:
+        pass
+    try:
+        res = requests.post(SERVER_URL, timeout=1.5)
         return True, f"En línea ({SERVER_URL})"
     except Exception:
-        try:
-            requests.post(SERVER_URL, timeout=1.5)
-            return True, f"En línea ({SERVER_URL})"
-        except Exception:
-            return False, f"Sin respuesta ({SERVER_URL})"
+        return False, f"Sin respuesta ({SERVER_URL})"
 
 def autodiagnostico_hardware():
     global hw_mic_ok, hw_parlante_ok, hw_camara_ok, hw_sensores_ok, hw_motores_ok, hw_servidor_ok
@@ -218,9 +246,8 @@ def autodiagnostico_hardware():
     print(f" [{'✅' if hw_servidor_ok else '⚠️'}] SERVIDOR YOLO       : {msg_servidor}")
     print("="*62)
 
-    # Mensajes explicativos según qué falte
     if not hw_mic_ok:
-        print(">> [AVISO] Comandos de voz desactivados. Usa comandos por teclado.")
+        print(">> [AVISO] Micrófono no disponible. Usa comandos por teclado.")
     if not hw_camara_ok:
         print(">> [AVISO] Cámara no detectada. La detección visual esperará conexión.")
     if not hw_sensores_ok or not hw_motores_ok:
@@ -240,9 +267,6 @@ def enviar_motor(cmd):
             if not alerta_motores_mostrada:
                 print("⚠️ [ALERTA] Se perdió la comunicación con Arduino Motores.")
                 alerta_motores_mostrada = True
-    else:
-        # Modo simulación silenciosa
-        pass
 
 def mover_stepper(steps):
     if ser_motores and ser_motores.is_open and steps != 0:
@@ -284,21 +308,24 @@ def hilo_reconocimiento_voz():
     if not hw_mic_ok:
         return
 
-    recognizer = sr.Recognizer()
-    try:
-        mic = sr.Microphone()
-    except Exception:
-        return
+    with suprimir_salida_c():
+        recognizer = sr.Recognizer()
+        try:
+            mic = sr.Microphone()
+        except Exception:
+            return
 
     print(">> [VOZ] Escuchando continuamente por el micrófono...")
 
     while running:
         if estado_actual in [EstadoSistema.REPOSO, EstadoSistema.EN_OBJETIVO_SONIDO]:
             try:
-                with mic as source:
-                    recognizer.adjust_for_ambient_noise(source, duration=0.3)
-                    audio = recognizer.listen(source, phrase_time_limit=4)
-                texto = recognizer.recognize_google(audio, language="es-CL").lower()
+                with suprimir_salida_c():
+                    with mic as source:
+                        recognizer.adjust_for_ambient_noise(source, duration=0.3)
+                        audio = recognizer.listen(source, phrase_time_limit=4)
+                    texto = recognizer.recognize_google(audio, language="es-CL").lower()
+                
                 print(f">> [VOZ ESCUCHADA]: \"{texto}\"")
 
                 if estado_actual == EstadoSistema.REPOSO:
