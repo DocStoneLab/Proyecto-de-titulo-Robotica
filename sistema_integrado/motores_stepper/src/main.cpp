@@ -9,21 +9,23 @@ const int M2_A = 6; const int M2_B = 7;
 const int M4_A = 8; const int M4_B = 9;
 
 // ── MOTOR PASO A PASO (Paneo Cámara 28BYJ-48) ──
-const int STEPS_PER_REV = 2048;
-const int HALF_REV      = 1024;
-const int QUARTER_REV   = 512;
-const int SWITCH_PIN    = A5;
-const int SWITCH_OFFSET = 100;
+const int STEPS_PER_REV   = 2048;
+const int HALF_REV        = 1024;
+const int QUARTER_REV     = 512;
+const int SWITCH_PIN      = A5;
+const int SWITCH_OFFSET   = 0;    // El switch está exactamente en 90° (centro frontal)
+const int MAX_PAN_STEPS   = 450;  // Límite seguro (~79° a cada lado, 11° antes del tope de 180° y 0°)
+const int BUSQUEDA_HOMING = 250;  // Búsqueda suave de homing: ±250 pasos (~44° de ventana)
 
 // Ajustes de seguimiento (Tracking)
 const int TRACK_SPEED_RPM = 7;   // Velocidad con torque óptimo para no trabarse con la cámara
-const int MAX_TRACK_STEP  = 40;  // Límite de pasos por comando
+const int MAX_TRACK_STEP  = 40;  // Límite de pasos por comando individual
 
 Stepper stepper(STEPS_PER_REV, 11, 13, 12, 10);
 
 bool autoPan      = false;
 int  panDirection = -1;
-int  currentPos   = 0; // Posición actual en pasos (-512 a +512)
+int  currentPos   = 0; // Posición actual en pasos (-450 a +450, 0 = 90° centro)
 
 String inputBuffer = "";
 
@@ -51,50 +53,52 @@ bool switchPressed() {
 }
 
 void goHome() {
-  Serial.println(F("Homing: buscando switch de calibracion..."));
+  Serial.println(F("Homing: calibrando camara al frente (switch 90 deg)..."));
   stepper.setSpeed(6);
 
-  int pasos_dados = 0;
-
-  // Si ya arranca presionado
+  // Si ya arranca presionado en el centro
   if (switchPressed()) {
-    Serial.println(F("Switch ya presionado al inicio."));
-    stepper.step(SWITCH_OFFSET);
+    Serial.println(F("Switch ya presionado al inicio (centro 90 deg OK)."));
     currentPos = 0;
+    Serial.println(F("POS:0"));
     return;
   }
 
-  // 1. Buscar girando a la izquierda (hasta 512 pasos = 90 grados)
-  for (int i = 0; i < QUARTER_REV; i++) {
-    if (switchPressed()) {
-      Serial.println(F("Switch encontrado hacia la izquierda."));
-      stepper.step(SWITCH_OFFSET);
-      currentPos = 0;
-      return;
-    }
-    stepper.step(-1);
-    pasos_dados--;
-  }
+  int pasos_dados = 0;
 
-  // 2. Buscar girando a la derecha (hasta 1024 pasos = 180 grados desde la izquierda)
-  for (int i = 0; i < HALF_REV; i++) {
+  // 1. Buscar hacia un lado suavemente (hasta BUSQUEDA_HOMING = 250 pasos = ~44°)
+  for (int i = 0; i < BUSQUEDA_HOMING; i++) {
     if (switchPressed()) {
-      Serial.println(F("Switch encontrado hacia la derecha."));
-      stepper.step(SWITCH_OFFSET);
+      Serial.println(F("Switch encontrado (calibrado en centro 90 deg)."));
       currentPos = 0;
+      Serial.println(F("POS:0"));
       return;
     }
     stepper.step(1);
     pasos_dados++;
   }
 
-  // 3. Si NO se detectó el switch: regresar exactamente a la posición donde empezó (frente)
-  Serial.println(F("⚠️ ADVERTENCIA: Switch no detectado. Regresando al frente..."));
+  // 2. Buscar hacia el lado contrario (hasta BUSQUEDA_HOMING * 2 = 500 pasos = ~88° totales)
+  for (int i = 0; i < (BUSQUEDA_HOMING * 2); i++) {
+    if (switchPressed()) {
+      Serial.println(F("Switch encontrado en barrido opuesto (calibrado en centro 90 deg)."));
+      currentPos = 0;
+      Serial.println(F("POS:0"));
+      return;
+    }
+    stepper.step(-1);
+    pasos_dados--;
+  }
+
+  // 3. Si NO se detectó el switch dentro del rango seguro:
+  // Regresar suavemente a la posición de inicio para no quedar desfasado
+  Serial.println(F("⚠️ Switch no detectado en rango +-250 pasos. Regresando a posicion inicial."));
   if (pasos_dados != 0) {
     stepper.step(-pasos_dados);
   }
   currentPos = 0;
-  Serial.println(F("Cámara restablecida al centro inicial (0 grados)."));
+  Serial.println(F("Posicion actual asumida como centro (0 pasos / 90 deg)."));
+  Serial.println(F("POS:0"));
 }
 
 void moveSteps(int steps) {
@@ -107,12 +111,12 @@ void runAutoPan() {
   stepper.step(panDirection);
   currentPos += panDirection;
 
-  if (currentPos <= -QUARTER_REV) {
-    currentPos = -QUARTER_REV;
+  if (currentPos <= -MAX_PAN_STEPS) {
+    currentPos = -MAX_PAN_STEPS;
     panDirection = +1;
   }
-  if (currentPos >= QUARTER_REV) {
-    currentPos = QUARTER_REV;
+  if (currentPos >= MAX_PAN_STEPS) {
+    currentPos = MAX_PAN_STEPS;
     panDirection = -1;
   }
 }
@@ -120,19 +124,23 @@ void runAutoPan() {
 void trackStep(int steps) {
   autoPan = false;
 
+  // Limitar incremento individual
   if (steps > MAX_TRACK_STEP)  steps = MAX_TRACK_STEP;
   if (steps < -MAX_TRACK_STEP) steps = -MAX_TRACK_STEP;
 
-  int target = currentPos + steps;
-  if (target > QUARTER_REV)  steps = QUARTER_REV - currentPos;
-  if (target < -QUARTER_REV) steps = -QUARTER_REV - currentPos;
+  // Clampear para no superar nunca el límite físico seguro [-MAX_PAN_STEPS, MAX_PAN_STEPS]
+  int targetPos = constrain(currentPos + steps, -MAX_PAN_STEPS, MAX_PAN_STEPS);
+  int effectiveSteps = targetPos - currentPos;
 
-  if (steps != 0) {
+  if (effectiveSteps != 0) {
     stepper.setSpeed(TRACK_SPEED_RPM);
-    moveSteps(steps);
+    moveSteps(effectiveSteps);
     Serial.print(F("STEP:"));
-    Serial.print(steps);
+    Serial.print(effectiveSteps);
     Serial.print(F(" POS:"));
+    Serial.println(currentPos);
+  } else {
+    Serial.print(F("LIMITE POS:"));
     Serial.println(currentPos);
   }
 }
@@ -155,6 +163,7 @@ void ejecutarComandoSimple(char c) {
       break;
 
     case 'C': // Centrar cámara al frente (0)
+      autoPan = false;
       if (currentPos != 0) {
         stepper.setSpeed(TRACK_SPEED_RPM);
         moveSteps(-currentPos);
@@ -163,23 +172,34 @@ void ejecutarComandoSimple(char c) {
       Serial.println(F("POS:0"));
       break;
 
-    case 'L':
+    case 'L': { // Ir al extremo izquierdo seguro (-MAX_PAN_STEPS)
       autoPan = false;
-      moveSteps(-QUARTER_REV);
+      int delta = -MAX_PAN_STEPS - currentPos;
+      if (delta != 0) {
+        stepper.setSpeed(TRACK_SPEED_RPM);
+        moveSteps(delta);
+      }
+      Serial.print(F("POS:"));
+      Serial.println(currentPos);
       break;
+    }
 
-    case 'R':
+    case 'R': { // Ir al extremo derecho seguro (+MAX_PAN_STEPS)
       autoPan = false;
-      moveSteps(QUARTER_REV);
+      int delta = MAX_PAN_STEPS - currentPos;
+      if (delta != 0) {
+        stepper.setSpeed(TRACK_SPEED_RPM);
+        moveSteps(delta);
+      }
+      Serial.print(F("POS:"));
+      Serial.println(currentPos);
       break;
+    }
 
     case 'P':
       autoPan = !autoPan;
       if (autoPan) {
-        goHome();
         panDirection = -1;
-      } else {
-        goHome();
       }
       break;
 

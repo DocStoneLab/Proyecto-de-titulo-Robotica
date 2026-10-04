@@ -164,6 +164,8 @@ ultima_voz_escuchada    = "(esperando comando...)"
 ultimo_comando_chasis   = ' '
 ultimo_comando_stepper  = "Centrado (0)"
 pos_stepper_actual      = 0
+LIMITE_PAN_PASOS        = 450
+estado_switch_hardware  = "Desconocido"
 dir_stepper_barrido     = 1
 t_ultimo_barrido        = 0
 PASO_BARRIDO            = 20
@@ -469,6 +471,37 @@ def hilo_lectura_sensores():
         time.sleep(0.01)
 
 # ==========================================
+# HILO 1B: LECTURA DE ARDUINO MOTORES Y STEPPER
+# ==========================================
+def hilo_lectura_motores():
+    global running, pos_stepper_actual, estado_switch_hardware
+    while running:
+        if ser_motores and ser_motores.is_open:
+            try:
+                linea = ser_motores.readline().decode('utf-8', errors='ignore').strip()
+                if linea:
+                    if "POS:" in linea:
+                        val = linea.split("POS:")[1].strip()
+                        try:
+                            pos_stepper_actual = int(val)
+                        except ValueError:
+                            pass
+                    elif "SWITCH:" in linea:
+                        raw = linea.split("SWITCH:")[1].strip()
+                        if "PRESIONADO" in raw:
+                            estado_switch_hardware = "PRESIONADO (Centro 90°)"
+                        else:
+                            estado_switch_hardware = "LIBRE"
+                    elif any(k in linea for k in ["Homing", "Switch", "calibrado", "reestablecida", "centro"]):
+                        log_evento(f"Stepper: {linea[:35]}")
+
+                if ser_motores.in_waiting > 120:
+                    ser_motores.reset_input_buffer()
+            except Exception:
+                pass
+        time.sleep(0.01)
+
+# ==========================================
 # HILO 2: RECONOCIMIENTO DE VOZ
 # ==========================================
 def iniciar_busqueda():
@@ -591,12 +624,12 @@ def hilo_teclado():
 
             if cmd in ['j', 'left']:
                 mover_stepper(-30)
-                pos_stepper_actual -= 30
+                pos_stepper_actual = max(-LIMITE_PAN_PASOS, pos_stepper_actual - 30)
                 ultimo_evento_teclado = "Cámara Izquierda (-30 pasos)"
                 renderizar_dashboard()
             elif cmd in ['l', 'right']:
                 mover_stepper(30)
-                pos_stepper_actual += 30
+                pos_stepper_actual = min(LIMITE_PAN_PASOS, pos_stepper_actual + 30)
                 ultimo_evento_teclado = "Cámara Derecha (+30 pasos)"
                 renderizar_dashboard()
             elif cmd in ['h', 'c']:
@@ -780,6 +813,8 @@ def renderizar_dashboard():
     # 4. Stepper Cámara
     grados_aprox = int(pos_stepper_actual * 360 / 2048)
     stepper_str = f"{pos_stepper_actual:+d} pasos ({grados_aprox:+d}°) | {ultimo_comando_stepper}"
+    if estado_switch_hardware != "Desconocido":
+        stepper_str += f" | Sw: {estado_switch_hardware}"
 
     # 5. Visión YOLO
     if info_mochila['detectada']:
@@ -859,6 +894,7 @@ def main():
 
     # 2. Iniciar hilos auxiliares
     threading.Thread(target=hilo_lectura_sensores, daemon=True).start()
+    threading.Thread(target=hilo_lectura_motores, daemon=True).start()
     threading.Thread(target=hilo_reconocimiento_voz, daemon=True).start()
     threading.Thread(target=hilo_teclado, daemon=True).start()
     threading.Thread(target=hilo_dashboard_terminal, daemon=True).start()
