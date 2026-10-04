@@ -669,6 +669,10 @@ def hilo_teclado():
                 enviar_motor('K')
                 ultimo_evento_teclado = "Diagnóstico switch (K)"
                 renderizar_dashboard()
+            elif cmd == 'z':
+                enviar_motor('Z')
+                ultimo_evento_teclado = "Test LEDs ULN2003 (Z: A->B->C->D)"
+                renderizar_dashboard()
             elif cmd == 'q':
                 ultimo_evento_teclado = "Saliendo..."
                 running = False
@@ -856,7 +860,7 @@ def renderizar_dashboard():
         make_box_row(f"📢 ESTADO / EVENTO: {ultimo_evento_sistema}"),
         div,
         make_box_row("⌨️ TECLAS DIRECTAS (Sin presionar Enter):"),
-        make_box_row("   [j / ◄] Cámara Izq  | [l / ►] Cámara Der | [h] Centrar Cámara"),
+        make_box_row("   [j / ◄] Cámara Izq  | [l / ►] Cámara Der | [h] Centrar | [z] Test LEDs"),
         make_box_row("   [b] Buscar Mochila  | [r] Volver a Pista | [ESPACIO] Frenar | [q] Salir"),
         bot
     ]
