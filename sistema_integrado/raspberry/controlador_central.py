@@ -395,6 +395,12 @@ def hilo_teclado():
             elif cmd == 'r':
                 print("\n⌨️ [TECLADO] Comando 'r': Iniciando retorno a la pista...")
                 iniciar_retorno_a_pista()
+            elif cmd == 'h':
+                print("\n⌨️ [TECLADO] Comando 'h': Calibrando/Centrando cámara...")
+                enviar_motor('H')
+            elif cmd == 'k':
+                print("\n⌨️ [TECLADO] Comando 'k': Consultando estado del switch A5...")
+                enviar_motor('K')
             elif cmd == ' ':
                 print("\n⌨️ [TECLADO] Freno manual activado.")
                 enviar_motor(' ')

@@ -51,29 +51,50 @@ bool switchPressed() {
 }
 
 void goHome() {
-  Serial.println(F("Homing..."));
-  stepper.setSpeed(5);
+  Serial.println(F("Homing: buscando switch de calibracion..."));
+  stepper.setSpeed(6);
 
+  int pasos_dados = 0;
+
+  // Si ya arranca presionado
+  if (switchPressed()) {
+    Serial.println(F("Switch ya presionado al inicio."));
+    stepper.step(SWITCH_OFFSET);
+    currentPos = 0;
+    return;
+  }
+
+  // 1. Buscar girando a la izquierda (hasta 512 pasos = 90 grados)
   for (int i = 0; i < QUARTER_REV; i++) {
     if (switchPressed()) {
-      Serial.println(F("Switch encontrado desde la izquierda."));
+      Serial.println(F("Switch encontrado hacia la izquierda."));
+      stepper.step(SWITCH_OFFSET);
       currentPos = 0;
       return;
     }
     stepper.step(-1);
+    pasos_dados--;
   }
 
+  // 2. Buscar girando a la derecha (hasta 1024 pasos = 180 grados desde la izquierda)
   for (int i = 0; i < HALF_REV; i++) {
     if (switchPressed()) {
-      Serial.println(F("Switch encontrado desde la derecha (aplicando offset)."));
+      Serial.println(F("Switch encontrado hacia la derecha."));
       stepper.step(SWITCH_OFFSET);
       currentPos = 0;
       return;
     }
     stepper.step(1);
+    pasos_dados++;
   }
 
-  Serial.println(F("ADVERTENCIA: Switch no encontrado."));
+  // 3. Si NO se detectó el switch: regresar exactamente a la posición donde empezó (frente)
+  Serial.println(F("⚠️ ADVERTENCIA: Switch no detectado. Regresando al frente..."));
+  if (pasos_dados != 0) {
+    stepper.step(-pasos_dados);
+  }
+  currentPos = 0;
+  Serial.println(F("Cámara restablecida al centro inicial (0 grados)."));
 }
 
 void moveSteps(int steps) {
@@ -151,6 +172,11 @@ void ejecutarComandoSimple(char c) {
       Serial.println(currentPos);
       break;
 
+    case 'K': // Diagnóstico de switch
+      Serial.print(F("SWITCH:"));
+      Serial.println(digitalRead(SWITCH_PIN) == LOW ? F("PRESIONADO_LOW") : F("LIBRE_HIGH"));
+      break;
+
     case '\n': case '\r':
       break;
 
@@ -167,9 +193,12 @@ void setup() {
   for (int i = 0; i < 8; i++) pinMode(pinesMotores[i], OUTPUT);
 
   pinMode(SWITCH_PIN, INPUT_PULLUP);
-  stepper.setSpeed(5);
+  stepper.setSpeed(6);
 
   Serial.println(F("Iniciando Arduino Motores y Stepper..."));
+  Serial.print(F("Estado inicial Switch A5: "));
+  Serial.println(digitalRead(SWITCH_PIN) == LOW ? F("PRESIONADO (LOW)") : F("LIBRE (HIGH)"));
+
   goHome();
   Serial.println(F("Listo para recibir comandos desde Raspberry Pi (USB)."));
 }
