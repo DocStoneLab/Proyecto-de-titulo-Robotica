@@ -28,8 +28,39 @@ import sys
 import ctypes
 import contextlib
 import glob
+import unicodedata
+import select
+import termios
+import tty
+import atexit
 import speech_recognition as sr
 from alert_sound import sonar_alerta, sonar_conexion, MAC_PARLANTE
+
+# ==========================================
+# GESTIÓN Y RESTAURACIÓN DE TERMINAL SSH
+# ==========================================
+old_term_settings = None
+if sys.stdin.isatty():
+    try:
+        old_term_settings = termios.tcgetattr(sys.stdin.fileno())
+    except Exception:
+        old_term_settings = None
+
+def restaurar_terminal():
+    global old_term_settings
+    if old_term_settings is not None:
+        try:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_term_settings)
+        except Exception:
+            pass
+        old_term_settings = None
+    try:
+        sys.stdout.write("\033[?25h\n")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+atexit.register(restaurar_terminal)
 
 # ==========================================
 # SUPRESOR DE MENSAJES C (ALSA / JACK / PyAudio)
@@ -138,6 +169,12 @@ t_ultimo_barrido        = 0
 PASO_BARRIDO            = 20
 LIMITE_BARRIDO_PASOS    = 240
 info_mochila            = {'detectada': False, 'center_x': 0, 'error_x': 0, 'conf': 0.0}
+ultimo_evento_teclado   = "Esperando tecla..."
+ultimo_evento_sistema   = "Sistema iniciado en REPOSO"
+
+def log_evento(msg):
+    global ultimo_evento_sistema
+    ultimo_evento_sistema = msg
 
 # Variables de maniobra
 direccion_giro_inicial = ' '
@@ -364,17 +401,15 @@ def hilo_lectura_sensores():
 
 # ==========================================
 # HILO 2: RECONOCIMIENTO DE VOZ
+# ==========================================
 def iniciar_busqueda():
     global estado_actual
-    print("\n🚀 [INICIO] Iniciando búsqueda de la mochila y reproduciendo sonido de conexión...")
+    log_evento("🚀 Búsqueda de mochila iniciada")
     threading.Thread(target=sonar_conexion, daemon=True).start()
     estado_actual = EstadoSistema.SEGUIR_PISTA
 
-# ==========================================
-# HILO 2: RECONOCIMIENTO DE VOZ CONTINUO
-# ==========================================
 def hilo_reconocimiento_voz():
-    global estado_actual, running
+    global estado_actual, running, ultima_voz_escuchada
     if not hw_mic_ok:
         return
 
@@ -388,10 +423,7 @@ def hilo_reconocimiento_voz():
         except Exception:
             return
 
-    print(">> [VOZ] Escuchando continuamente por el micrófono...")
-
     while running:
-        # Durante la maniobra de retorno a la cinta se pausa brevemente la escucha
         if estado_actual == EstadoSistema.RETORNO_A_PISTA:
             time.sleep(0.3)
             continue
@@ -403,11 +435,12 @@ def hilo_reconocimiento_voz():
                 texto = recognizer.recognize_google(audio, language="es-CL").lower()
             
             ultima_voz_escuchada = f"\"{texto}\""
+            log_evento(f"Voz: \"{texto}\"")
+            renderizar_dashboard()
 
             # 1. En reposo: escuchar orden para iniciar la búsqueda
             if estado_actual == EstadoSistema.REPOSO:
                 if any(frase in texto for frase in TRIGGER_VOZ_BUSCAR):
-                    print("\n🚀 [VOZ] Comando de búsqueda recibido.")
                     iniciar_busqueda()
 
             # 2. En cualquier momento de la búsqueda o en el objetivo: escuchar 'listo', 'para', 'stop'
@@ -418,11 +451,11 @@ def hilo_reconocimiento_voz():
                 EstadoSistema.EN_OBJETIVO_SONIDO
             ]:
                 if any(frase in texto for frase in TRIGGER_VOZ_PARAR):
-                    print("\n🛑 [VOZ] Comando de parada ('stop/alto') recibido. Frenando robot...")
                     enviar_motor(' ')
                     estado_actual = EstadoSistema.REPOSO
+                    log_evento("🛑 Parada por voz (stop/alto)")
+                    renderizar_dashboard()
                 elif any(frase in texto for frase in TRIGGER_VOZ_RETORNO):
-                    print("\n🔄 [VOZ] Comando 'Listo/Retorno' recibido. Iniciando retorno a la pista...")
                     iniciar_retorno_a_pista()
 
         except sr.WaitTimeoutError:
@@ -433,43 +466,109 @@ def hilo_reconocimiento_voz():
             pass
 
 # ==========================================
-# HILO 3: ENTRADA POR TECLADO (FALLBACK SSH)
+# HILO 3: ENTRADA POR TECLADO EN VIVO (SSH DIRECTO)
 # ==========================================
+def leer_tecla_no_bloqueante(timeout=0.1):
+    if not sys.stdin.isatty():
+        time.sleep(timeout)
+        return None
+    try:
+        rlist, _, _ = select.select([sys.stdin], [], [], timeout)
+        if not rlist:
+            return None
+        ch = sys.stdin.read(1)
+        if ch == '\x1b':
+            rlist2, _, _ = select.select([sys.stdin], [], [], 0.04)
+            if rlist2:
+                ch2 = sys.stdin.read(1)
+                if ch2 == '[':
+                    rlist3, _, _ = select.select([sys.stdin], [], [], 0.04)
+                    if rlist3:
+                        ch3 = sys.stdin.read(1)
+                        if ch3 == 'D': return 'left'
+                        if ch3 == 'C': return 'right'
+                        if ch3 == 'A': return 'up'
+                        if ch3 == 'B': return 'down'
+            return 'esc'
+        return ch
+    except Exception:
+        return None
+
 def hilo_teclado():
-    global estado_actual, running, pos_stepper_actual
+    global estado_actual, running, pos_stepper_actual, ultimo_evento_teclado
+
+    if sys.stdin.isatty():
+        try:
+            tty.setcbreak(sys.stdin.fileno())
+            attrs = termios.tcgetattr(sys.stdin.fileno())
+            attrs[3] &= ~termios.ECHO
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, attrs)
+        except Exception:
+            pass
+
     while running:
         try:
-            line = sys.stdin.readline()
-            if not line:
-                break
-            cmd = line.strip().lower()
-            if cmd == 'b':
-                iniciar_busqueda()
-            elif cmd == 'r':
-                iniciar_retorno_a_pista()
-            elif cmd in ['j', 'left']:
-                # Gira la cámara 30 pasos hacia la izquierda
+            if sys.stdin.isatty():
+                tecla = leer_tecla_no_bloqueante(timeout=0.1)
+                if not tecla:
+                    continue
+                cmd = tecla.lower()
+            else:
+                line = sys.stdin.readline()
+                if not line:
+                    time.sleep(0.2)
+                    continue
+                cmd = line.strip().lower()
+
+            if cmd in ['j', 'left']:
                 mover_stepper(-30)
                 pos_stepper_actual -= 30
+                ultimo_evento_teclado = "Cámara Izquierda (-30 pasos)"
+                renderizar_dashboard()
             elif cmd in ['l', 'right']:
-                # Gira la cámara 30 pasos hacia la derecha
                 mover_stepper(30)
                 pos_stepper_actual += 30
-            elif cmd == 'h':
+                ultimo_evento_teclado = "Cámara Derecha (+30 pasos)"
+                renderizar_dashboard()
+            elif cmd in ['h', 'c']:
                 centrar_camara()
-            elif cmd.startswith('t') and len(cmd) > 1:
-                try:
-                    pasos = int(cmd[1:].strip())
-                    mover_stepper(pasos)
-                    pos_stepper_actual += pasos
-                except Exception:
-                    pass
-            elif cmd == 'k':
-                enviar_motor('K')
-            elif cmd == ' ':
+                ultimo_evento_teclado = "Cámara Centrada al frente (0)"
+                renderizar_dashboard()
+            elif cmd == 'b':
+                ultimo_evento_teclado = "Búsqueda Iniciada ('b')"
+                iniciar_busqueda()
+                renderizar_dashboard()
+            elif cmd == 'r':
+                ultimo_evento_teclado = "Retorno a pista Iniciado ('r')"
+                iniciar_retorno_a_pista()
+                renderizar_dashboard()
+            elif cmd in [' ', 'stop']:
                 enviar_motor(' ')
                 estado_actual = EstadoSistema.REPOSO
+                ultimo_evento_teclado = "Freno general (REPOSO)"
+                renderizar_dashboard()
+            elif cmd in ['w', 'up']:
+                enviar_motor('w')
+                ultimo_evento_teclado = "Avanzar chasis (w)"
+                renderizar_dashboard()
+            elif cmd in ['s', 'down']:
+                enviar_motor('s')
+                ultimo_evento_teclado = "Retroceder chasis (s)"
+                renderizar_dashboard()
+            elif cmd == 'a':
+                enviar_motor('a')
+                ultimo_evento_teclado = "Giro izquierda chasis (a)"
+                renderizar_dashboard()
+            elif cmd == 'd':
+                enviar_motor('d')
+                ultimo_evento_teclado = "Giro derecha chasis (d)"
+                renderizar_dashboard()
+            elif cmd == 'k':
+                enviar_motor('K')
+                ultimo_evento_teclado = "Diagnóstico switch (K)"
+                renderizar_dashboard()
             elif cmd == 'q':
+                ultimo_evento_teclado = "Saliendo..."
                 running = False
                 break
         except Exception:
@@ -480,6 +579,7 @@ def hilo_teclado():
 # ==========================================
 def notificar_llegada_mochila():
     global estado_actual, tiempo_avance_total
+    log_evento("🎯 Objetivo mochila alcanzado (<=10 cm)")
     enviar_motor(' ')
     centrar_camara()
     estado_actual = EstadoSistema.EN_OBJETIVO_SONIDO
@@ -488,13 +588,14 @@ def notificar_llegada_mochila():
 
 def iniciar_retorno_a_pista():
     global estado_actual
+    log_evento("🔄 Retorno a pista iniciado")
     centrar_camara()
     estado_actual = EstadoSistema.RETORNO_A_PISTA
     threading.Thread(target=ejecutar_maniobra_retorno, daemon=True).start()
 
 def ejecutar_maniobra_retorno():
     global estado_actual
-    print(">> [RETORNO] Retrocediendo hacia la cinta predefinida...")
+    log_evento(">> [RETORNO] Retrocediendo hacia la cinta...")
     enviar_motor('s')
 
     t_inicio_rev = time.time()
@@ -502,7 +603,7 @@ def ejecutar_maniobra_retorno():
 
     while time.time() - t_inicio_rev < tiempo_max_rev:
         if linea_izq or linea_cen or linea_der:
-            print(">> [RETORNO] ¡Cinta detectada! Frenando reversa.")
+            log_evento(">> [RETORNO] ¡Cinta detectada! Frenando.")
             enviar_motor(' ')
             break
         time.sleep(0.02)
@@ -511,16 +612,16 @@ def ejecutar_maniobra_retorno():
     time.sleep(0.2)
 
     if direccion_giro_inicial == 'a':
-        print(">> [RETORNO] Contragiro a la DERECHA para alinearse con el circuito...")
+        log_evento(">> [RETORNO] Contragiro a la DERECHA...")
         enviar_motor('d')
         time.sleep(tiempo_giro_ms / 1000.0)
     elif direccion_giro_inicial == 'd':
-        print(">> [RETORNO] Contragiro a la IZQUIERDA para alinearse con el circuito...")
+        log_evento(">> [RETORNO] Contragiro a la IZQUIERDA...")
         enviar_motor('a')
         time.sleep(tiempo_giro_ms / 1000.0)
 
     enviar_motor(' ')
-    print(">> [RETORNO] Reenganche completado. Reanudando circuito normal.")
+    log_evento(">> [RETORNO] Reenganche completado. Reanudando pista.")
     estado_actual = EstadoSistema.SEGUIR_PISTA
 
 def ejecutar_seguimiento_linea():
@@ -538,22 +639,42 @@ def ejecutar_seguimiento_linea():
 # ==========================================
 # INTERFAZ EN VIVO: DASHBOARD EN TERMINAL
 # ==========================================
-def hilo_dashboard_terminal():
-    global running
-    # Dejar pasar el autodiagnóstico inicial
-    time.sleep(2.0)
-    while running:
-        try:
-            renderizar_dashboard()
-            time.sleep(0.25)
-        except Exception:
-            pass
+def display_width(s):
+    w = 0
+    for c in s:
+        if unicodedata.category(c) == 'Mn' or c == '\ufe0f':
+            continue
+        eaw = unicodedata.east_asian_width(c)
+        if eaw in ('W', 'F'):
+            w += 2
+        else:
+            w += 1
+    return w
+
+def make_box_row(content, total_width=76):
+    prefix = "║ "
+    suffix = " ║"
+    w_fixed = display_width(prefix) + display_width(suffix)
+    avail = total_width - w_fixed
+    t = ""
+    w_t = 0
+    for c in content:
+        cw = 2 if unicodedata.east_asian_width(c) in ('W', 'F') else (0 if (unicodedata.category(c) == 'Mn' or c == '\ufe0f') else 1)
+        if w_t + cw > avail:
+            break
+        t += c
+        w_t += cw
+    padding = " " * max(0, avail - w_t)
+    return f"{prefix}{t}{padding}{suffix}"
 
 def renderizar_dashboard():
+    if not sys.stdin.isatty():
+        return
+
     # 1. Sensores de línea (TCRT5000)
-    izq_sym = "⬛" if linea_izq else "⬜"
-    cen_sym = "⬛" if linea_cen else "⬜"
-    der_sym = "⬛" if linea_der else "⬜"
+    izq_sym = "■" if linea_izq else "□"
+    cen_sym = "■" if linea_cen else "□"
+    der_sym = "■" if linea_der else "□"
     linea_str = f"[{izq_sym} IZQ] [{cen_sym} CEN] [{der_sym} DER]  ({linea_izq},{linea_cen},{linea_der})"
 
     # 2. Sensor Ultrasonido
@@ -587,24 +708,50 @@ def renderizar_dashboard():
         else:
             vision_str = "❌ No visible en este fotograma"
 
-    panel = (
-        "\033[H\033[2J"
-        "╔══════════════════════════════════════════════════════════════════════════════╗\n"
-        "║                🤖 NAVBOT - PANEL DE MONITOREO EN TIEMPO REAL                 ║\n"
-        f"║  ESTADO DEL ROBOT : [ {estado_actual.center(22)} ]                             ║\n"
-        "╠══════════════════════════════════════════════════════════════════════════════╣\n"
-        f"║ 🎤 VOZ ESCUCHADA  : {ultima_voz_escuchada[:53].ljust(55)}║\n"
-        f"║ 📡 LÍNEA (TCRT)   : {linea_str[:53].ljust(55)}║\n"
-        f"║ 📏 ULTRASONIDO    : {dist_str[:53].ljust(55)}║\n"
-        f"║ ⚙️ MOTORES CHASIS : {motor_desc[:53].ljust(55)}║\n"
-        f"║ 🎥 CÁMARA (PAN)   : {stepper_str[:53].ljust(55)}║\n"
-        f"║ 🎯 VISIÓN YOLO    : {vision_str[:53].ljust(55)}║\n"
-        "╠══════════════════════════════════════════════════════════════════════════════╣\n"
-        "║ ⌨️ TECLAS: [j/l] Gira Cámara | [h] Centrar | [b] Buscar | [ ] Stop | [q] Salir  ║\n"
-        "╚══════════════════════════════════════════════════════════════════════════════╝\n"
-    )
+    top = "╔" + "═"*74 + "╗"
+    div = "╠" + "═"*74 + "╣"
+    bot = "╚" + "═"*74 + "╝"
+
+    rows = [
+        top,
+        make_box_row("NAVBOT - PANEL DE MONITOREO EN TIEMPO REAL".center(72)),
+        make_box_row(f"ESTADO DEL ROBOT : [ {estado_actual.center(22)} ]"),
+        div,
+        make_box_row(f"🎤 VOZ ESCUCHADA  : {ultima_voz_escuchada}"),
+        make_box_row(f"📡 SENSORES LÍNEA : {linea_str}"),
+        make_box_row(f"📏 ULTRASONIDO    : {dist_str}"),
+        make_box_row(f"⚙️ MOTORES CHASIS : {motor_desc}"),
+        make_box_row(f"🎥 CÁMARA (PAN)   : {stepper_str}"),
+        make_box_row(f"🎯 VISIÓN YOLO    : {vision_str}"),
+        div,
+        make_box_row(f"⌨️ ÚLTIMA ACCIÓN  : {ultimo_evento_teclado}"),
+        make_box_row(f"📢 ESTADO / EVENTO: {ultimo_evento_sistema}"),
+        div,
+        make_box_row("⌨️ TECLAS DIRECTAS (Sin presionar Enter):"),
+        make_box_row("   [j / ◄] Cámara Izq  | [l / ►] Cámara Der | [h] Centrar Cámara"),
+        make_box_row("   [b] Buscar Mochila  | [r] Volver a Pista | [ESPACIO] Frenar | [q] Salir"),
+        bot
+    ]
+
+    panel = "\033[H" + "\n".join(f"{r}\033[K" for r in rows) + "\n\033[K"
     sys.stdout.write(panel)
     sys.stdout.flush()
+
+def hilo_dashboard_terminal():
+    global running
+    # Dejar pasar el autodiagnóstico inicial para que se pueda leer con calma
+    time.sleep(2.5)
+
+    if running and sys.stdin.isatty():
+        sys.stdout.write("\033[2J\033[H\033[?25l")  # Limpiar pantalla 1 sola vez y ocultar cursor
+        sys.stdout.flush()
+
+    while running:
+        try:
+            renderizar_dashboard()
+            time.sleep(0.5)
+        except Exception:
+            pass
 
 # ==========================================
 # BUCLE PRINCIPAL (CÁMARA + YOLO + CONTROL)
@@ -743,9 +890,11 @@ def main():
     finally:
         running = False
         enviar_motor(' ')
+        restaurar_terminal()
         if cap: cap.release()
         if ser_sensores: ser_sensores.close()
         if ser_motores: ser_motores.close()
+        print("\n>> Sistema detenido correctamente.")
 
 if __name__ == '__main__':
     main()
