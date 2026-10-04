@@ -128,6 +128,17 @@ linea_izq        = 0
 linea_cen        = 0
 linea_der        = 0
 
+# Variables para interfaz en vivo (Dashboard)
+ultima_voz_escuchada    = "(esperando comando...)"
+ultimo_comando_chasis   = ' '
+ultimo_comando_stepper  = "Centrado (0)"
+pos_stepper_actual      = 0
+dir_stepper_barrido     = 1
+t_ultimo_barrido        = 0
+PASO_BARRIDO            = 20
+LIMITE_BARRIDO_PASOS    = 240
+info_mochila            = {'detectada': False, 'center_x': 0, 'error_x': 0, 'conf': 0.0}
+
 # Variables de maniobra
 direccion_giro_inicial = ' '
 tiempo_giro_ms         = 450
@@ -300,22 +311,31 @@ def autodiagnostico_hardware():
 # ENVÍO SEGURO DE COMANDOS A MOTORES
 # ==========================================
 def enviar_motor(cmd):
-    global alerta_motores_mostrada
+    global ultimo_comando_chasis, alerta_motores_mostrada
+    ultimo_comando_chasis = cmd
     if ser_motores and ser_motores.is_open:
         try:
             ser_motores.write(cmd.encode())
             alerta_motores_mostrada = False
         except Exception:
             if not alerta_motores_mostrada:
-                print("⚠️ [ALERTA] Se perdió la comunicación con Arduino Motores.")
                 alerta_motores_mostrada = True
 
 def mover_stepper(steps):
+    global ultimo_comando_stepper
     if ser_motores and ser_motores.is_open and steps != 0:
         try:
             ser_motores.write(f"T{steps}\n".encode())
+            ultimo_comando_stepper = f"T{steps:+d} pasos"
         except Exception:
             pass
+
+def centrar_camara():
+    global pos_stepper_actual, ultimo_comando_stepper
+    if pos_stepper_actual != 0:
+        mover_stepper(-pos_stepper_actual)
+        pos_stepper_actual = 0
+        ultimo_comando_stepper = "Centrado (0)"
 
 # ==========================================
 # HILO 1: LECTURA DE ARDUINO SENSORES
@@ -382,7 +402,7 @@ def hilo_reconocimiento_voz():
                     audio = recognizer.listen(source, timeout=2.5, phrase_time_limit=3.5)
                 texto = recognizer.recognize_google(audio, language="es-CL").lower()
             
-            print(f">> [VOZ ESCUCHADA]: \"{texto}\"")
+            ultima_voz_escuchada = f"\"{texto}\""
 
             # 1. En reposo: escuchar orden para iniciar la búsqueda
             if estado_actual == EstadoSistema.REPOSO:
@@ -452,16 +472,14 @@ def hilo_teclado():
 def notificar_llegada_mochila():
     global estado_actual, tiempo_avance_total
     enviar_motor(' ')
+    centrar_camara()
     estado_actual = EstadoSistema.EN_OBJETIVO_SONIDO
     tiempo_avance_total = time.time() - tiempo_avance_inicio
-    print(f"\n==========================================")
-    print(f"🎯 ¡MOCHILA ALCANZADA! Distancia: {distancia_frente} cm")
-    print(f"==========================================")
     sonar_alerta()
-    print(">> Esperando comando de voz ('listo' / 'para') o tecla 'r'...")
 
 def iniciar_retorno_a_pista():
     global estado_actual
+    centrar_camara()
     estado_actual = EstadoSistema.RETORNO_A_PISTA
     threading.Thread(target=ejecutar_maniobra_retorno, daemon=True).start()
 
@@ -509,11 +527,83 @@ def ejecutar_seguimiento_linea():
         enviar_motor('w')
 
 # ==========================================
+# INTERFAZ EN VIVO: DASHBOARD EN TERMINAL
+# ==========================================
+def hilo_dashboard_terminal():
+    global running
+    # Dejar pasar el autodiagnóstico inicial
+    time.sleep(2.0)
+    while running:
+        try:
+            renderizar_dashboard()
+            time.sleep(0.25)
+        except Exception:
+            pass
+
+def renderizar_dashboard():
+    # 1. Sensores de línea (TCRT5000)
+    izq_sym = "⬛" if linea_izq else "⬜"
+    cen_sym = "⬛" if linea_cen else "⬜"
+    der_sym = "⬛" if linea_der else "⬜"
+    linea_str = f"[{izq_sym} IZQ] [{cen_sym} CEN] [{der_sym} DER]  ({linea_izq},{linea_cen},{linea_der})"
+
+    # 2. Sensor Ultrasonido
+    if distancia_frente < 400:
+        dist_str = f"{distancia_frente} cm"
+    else:
+        dist_str = "> 100 cm (Libre)"
+
+    # 3. Motores Chasis
+    motor_desc = {
+        'w': "AVANZAR (Adelante)",
+        's': "RETROCEDER (Reversa)",
+        'a': "GIRAR A LA IZQUIERDA",
+        'd': "GIRAR A LA DERECHA",
+        ' ': "DETENIDO / FRENO"
+    }.get(ultimo_comando_chasis, f"Comando '{ultimo_comando_chasis}'")
+
+    # 4. Stepper Cámara
+    grados_aprox = int(pos_stepper_actual * 360 / 2048)
+    stepper_str = f"{pos_stepper_actual:+d} pasos ({grados_aprox:+d}°) | {ultimo_comando_stepper}"
+
+    # 5. Visión YOLO
+    if info_mochila['detectada']:
+        dir_err = "IZQUIERDA" if info_mochila['error_x'] < 0 else "DERECHA" if info_mochila['error_x'] > 0 else "CENTRADA"
+        vision_str = f"🎯 ENCONTRADA | X={info_mochila['center_x']}px | Error={info_mochila['error_x']:+d}px ({dir_err}) | Conf={info_mochila['conf']*100:.0f}%"
+    else:
+        if estado_actual == EstadoSistema.SEGUIR_PISTA:
+            vision_str = "🔍 Buscando... (Barrido de cámara activo)"
+        elif estado_actual == EstadoSistema.REPOSO:
+            vision_str = "⏸️ Sistema en reposo (esperando orden)"
+        else:
+            vision_str = "❌ No visible en este fotograma"
+
+    panel = (
+        "\033[H\033[2J"
+        "╔══════════════════════════════════════════════════════════════════════════════╗\n"
+        "║                🤖 NAVBOT - PANEL DE MONITOREO EN TIEMPO REAL                 ║\n"
+        f"║  ESTADO DEL ROBOT : [ {estado_actual.center(22)} ]                             ║\n"
+        "╠══════════════════════════════════════════════════════════════════════════════╣\n"
+        f"║ 🎤 VOZ ESCUCHADA  : {ultima_voz_escuchada[:53].ljust(55)}║\n"
+        f"║ 📡 LÍNEA (TCRT)   : {linea_str[:53].ljust(55)}║\n"
+        f"║ 📏 ULTRASONIDO    : {dist_str[:53].ljust(55)}║\n"
+        f"║ ⚙️ MOTORES CHASIS : {motor_desc[:53].ljust(55)}║\n"
+        f"║ 🎥 CÁMARA (PAN)   : {stepper_str[:53].ljust(55)}║\n"
+        f"║ 🎯 VISIÓN YOLO    : {vision_str[:53].ljust(55)}║\n"
+        "╠══════════════════════════════════════════════════════════════════════════════╣\n"
+        "║ ⌨️ TECLAS: [b] Buscar | [r] Retorno | [h] Centrar cámara | [ ] Parar | [q] Salir  ║\n"
+        "╚══════════════════════════════════════════════════════════════════════════════╝\n"
+    )
+    sys.stdout.write(panel)
+    sys.stdout.flush()
+
+# ==========================================
 # BUCLE PRINCIPAL (CÁMARA + YOLO + CONTROL)
 # ==========================================
 def main():
     global estado_actual, running, direccion_giro_inicial, tiempo_avance_inicio
     global alerta_camara_mostrada, alerta_servidor_mostrada
+    global t_ultimo_barrido, dir_stepper_barrido, pos_stepper_actual, info_mochila
 
     # 1. Autodiagnóstico modular de inicio
     autodiagnostico_hardware()
@@ -522,6 +612,7 @@ def main():
     threading.Thread(target=hilo_lectura_sensores, daemon=True).start()
     threading.Thread(target=hilo_reconocimiento_voz, daemon=True).start()
     threading.Thread(target=hilo_teclado, daemon=True).start()
+    threading.Thread(target=hilo_dashboard_terminal, daemon=True).start()
 
     cap = None
     frame_counter = 0
@@ -589,33 +680,52 @@ def main():
 
                     if mochila is not None:
                         center_x = mochila.get('center_x', CENTRO_X_OBJETIVO)
+                        conf = mochila.get('confidence', 0.0)
                         error_x  = center_x - CENTRO_X_OBJETIVO
 
-                        print(f"🎯 Mochila detectada en x={center_x} (Error={error_x}px)")
+                        info_mochila = {
+                            'detectada': True,
+                            'center_x': center_x,
+                            'error_x': error_x,
+                            'conf': conf
+                        }
 
+                        # Centrar cámara en la mochila detectada
                         steps_stepper = int(error_x * 0.12)
-                        mover_stepper(steps_stepper)
+                        if steps_stepper != 0:
+                            mover_stepper(steps_stepper)
+                            pos_stepper_actual += steps_stepper
 
                         if abs(error_x) > MARGEN_CENTRO_PX:
                             estado_actual = EstadoSistema.ALINEANDO_MOCHILA
                             if error_x < 0:
-                                print(">> Girando chasis a la IZQUIERDA ('a')...")
                                 enviar_motor('a')
                                 direccion_giro_inicial = 'a'
                             else:
-                                print(">> Girando chasis a la DERECHA ('d')...")
                                 enviar_motor('d')
                                 direccion_giro_inicial = 'd'
                         else:
                             if estado_actual != EstadoSistema.AVANZANDO_A_MOCHILA:
                                 estado_actual = EstadoSistema.AVANZANDO_A_MOCHILA
                                 tiempo_avance_inicio = time.time()
-                                print(">> Mochila centrada. Avanzando de frente ('w')...")
                             enviar_motor('w')
+                    else:
+                        info_mochila = {'detectada': False, 'center_x': 0, 'error_x': 0, 'conf': 0.0}
+
+                        # Paneo activo de cámara durante la búsqueda en pista
+                        if estado_actual == EstadoSistema.SEGUIR_PISTA:
+                            if time.time() - t_ultimo_barrido > 0.15:
+                                t_ultimo_barrido = time.time()
+                                paso = PASO_BARRIDO * dir_stepper_barrido
+                                mover_stepper(paso)
+                                pos_stepper_actual += paso
+                                if pos_stepper_actual >= LIMITE_BARRIDO_PASOS:
+                                    dir_stepper_barrido = -1
+                                elif pos_stepper_actual <= -LIMITE_BARRIDO_PASOS:
+                                    dir_stepper_barrido = 1
 
                 except Exception:
                     if not alerta_servidor_mostrada:
-                        print(f"⚠️ [ALERTA] Servidor YOLO no responde en {SERVER_URL}.")
                         alerta_servidor_mostrada = True
 
             # Detección ultrasónica de proximidad
