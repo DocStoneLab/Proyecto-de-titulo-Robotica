@@ -192,31 +192,66 @@ def test_camara():
     except Exception as e:
         return False, f"Error: {e}"
 
-def test_arduino_sensores():
-    global ser_sensores
-    puertos = [PUERTO_SENSORES] + glob.glob('/dev/ttyACM*')
-    puertos = list(dict.fromkeys(puertos))
+def detectar_arduinos():
+    global ser_sensores, ser_motores
+    # Buscar en todos los puertos seriales USB posibles
+    puertos = sorted(list(set(glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*'))))
+    if not puertos:
+        return (False, "No hay puertos /dev/ttyACM* ni /dev/ttyUSB*"), \
+               (False, "No hay puertos /dev/ttyACM* ni /dev/ttyUSB*")
+
+    msg_sensores = "No detectado"
+    msg_motores  = "No detectado"
+    ok_sensores  = False
+    ok_motores   = False
+    puerto_sensores = None
+
+    # 1. Identificar Arduino Sensores (transmite "TLM:" a 115200 baudios)
     for p in puertos:
+        try:
+            s = serial.Serial(p, BAUD_SENSORES, timeout=0.25)
+            time.sleep(0.1)
+            lineas = [s.readline().decode('utf-8', errors='ignore') for _ in range(4)]
+            if any("TLM:" in l for l in lineas):
+                ser_sensores = s
+                puerto_sensores = p
+                ok_sensores = True
+                msg_sensores = f"Conectado en {p} (telemetría TLM activa)"
+                break
+            else:
+                s.close()
+        except Exception:
+            pass
+
+    # Puertos disponibles para el Arduino de Motores
+    puertos_restantes = [p for p in puertos if p != puerto_sensores]
+
+    # Si no detectó TLM pero hay puertos, intentar conectar el puerto preferido
+    if not ok_sensores and puertos_restantes:
+        p = PUERTO_SENSORES if PUERTO_SENSORES in puertos_restantes else puertos_restantes[0]
         try:
             ser_sensores = serial.Serial(p, BAUD_SENSORES, timeout=0.1)
-            return True, f"Conectado en {p}"
-        except Exception:
-            pass
-    ser_sensores = None
-    return False, f"No detectado en {PUERTO_SENSORES}"
+            ok_sensores = True
+            puerto_sensores = p
+            msg_sensores = f"Conectado en {p}"
+            puertos_restantes.remove(p)
+        except Exception as e:
+            msg_sensores = f"Error al abrir {p}: {e}"
 
-def test_arduino_motores():
-    global ser_motores
-    puertos = [PUERTO_MOTORES] + glob.glob('/dev/ttyUSB*')
-    puertos = list(dict.fromkeys(puertos))
-    for p in puertos:
+    # 2. Conectar Arduino Motores en el puerto restante a 9600 baudios
+    for p in puertos_restantes:
         try:
             ser_motores = serial.Serial(p, BAUD_MOTORES, timeout=0.1)
-            return True, f"Conectado en {p}"
-        except Exception:
-            pass
-    ser_motores = None
-    return False, f"No detectado en {PUERTO_MOTORES}"
+            ok_motores = True
+            msg_motores = f"Conectado en {p}"
+            break
+        except Exception as e:
+            msg_motores = f"Error al abrir {p}: {e}"
+
+    if not ok_motores and not ser_motores:
+        msg_motores = f"No detectado (puertos libres: {puertos_restantes})"
+
+    return (ok_sensores, msg_sensores), (ok_motores, msg_motores)
 
 def test_servidor_yolo():
     try:
@@ -242,8 +277,7 @@ def autodiagnostico_hardware():
     hw_mic_ok, msg_mic           = test_microfono()
     hw_parlante_ok, msg_parlante = test_parlante()
     hw_camara_ok, msg_camara     = test_camara()
-    hw_sensores_ok, msg_sensores = test_arduino_sensores()
-    hw_motores_ok, msg_motores   = test_arduino_motores()
+    (hw_sensores_ok, msg_sensores), (hw_motores_ok, msg_motores) = detectar_arduinos()
     hw_servidor_ok, msg_servidor = test_servidor_yolo()
 
     print(f" [{'✅' if hw_mic_ok else '❌'}] MICRÓFONO USB       : {msg_mic}")
