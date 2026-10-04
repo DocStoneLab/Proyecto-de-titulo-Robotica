@@ -16,7 +16,7 @@ const int SWITCH_PIN    = A5;
 const int SWITCH_OFFSET = 100;
 
 // Ajustes de seguimiento (Tracking)
-const int TRACK_SPEED_RPM = 12;  // Velocidad para respuesta rápida
+const int TRACK_SPEED_RPM = 7;   // Velocidad con torque óptimo para no trabarse con la cámara
 const int MAX_TRACK_STEP  = 40;  // Límite de pasos por comando
 
 Stepper stepper(STEPS_PER_REV, 11, 13, 12, 10);
@@ -130,6 +130,10 @@ void trackStep(int steps) {
   if (steps != 0) {
     stepper.setSpeed(TRACK_SPEED_RPM);
     moveSteps(steps);
+    Serial.print(F("STEP:"));
+    Serial.print(steps);
+    Serial.print(F(" POS:"));
+    Serial.println(currentPos);
   }
 }
 
@@ -140,6 +144,23 @@ void ejecutarComandoSimple(char c) {
   switch (toupper(c)) {
     case 'W': case 'S': case 'A': case 'D': case ' ':
       procesarComando(c);
+      break;
+
+    case '<': // Girar 30 pasos a la izquierda
+      trackStep(-30);
+      break;
+
+    case '>': // Girar 30 pasos a la derecha
+      trackStep(30);
+      break;
+
+    case 'C': // Centrar cámara al frente (0)
+      if (currentPos != 0) {
+        stepper.setSpeed(TRACK_SPEED_RPM);
+        moveSteps(-currentPos);
+      }
+      currentPos = 0;
+      Serial.println(F("POS:0"));
       break;
 
     case 'L':

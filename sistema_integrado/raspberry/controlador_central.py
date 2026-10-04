@@ -185,6 +185,8 @@ tiempo_avance_total    = 0
 # Puertos seriales y control
 ser_sensores = None
 ser_motores  = None
+puerto_sensores_asignado = "No detectado"
+puerto_motores_asignado  = "No detectado"
 running = True
 
 # Banderas de estado de hardware
@@ -241,7 +243,7 @@ def test_camara():
         return False, f"Error: {e}"
 
 def detectar_arduinos():
-    global ser_sensores, ser_motores
+    global ser_sensores, ser_motores, puerto_sensores_asignado, puerto_motores_asignado
     # Buscar en todos los puertos seriales USB posibles
     puertos = sorted(list(set(glob.glob('/dev/ttyACM*') + glob.glob('/dev/ttyUSB*'))))
     if not puertos:
@@ -253,51 +255,81 @@ def detectar_arduinos():
     ok_sensores  = False
     ok_motores   = False
     puerto_sensores = None
+    puerto_motores  = None
 
-    # 1. Identificar Arduino Sensores (transmite "TLM:" a 115200 baudios)
+    # 1. Probar puertos a 115200 buscando Arduino Sensores (transmite "TLM:" autónomamente)
     for p in puertos:
         try:
-            s = serial.Serial(p, BAUD_SENSORES, timeout=0.25)
-            time.sleep(0.1)
-            lineas = [s.readline().decode('utf-8', errors='ignore') for _ in range(4)]
-            if any("TLM:" in l for l in lineas):
+            s = serial.Serial(p, BAUD_SENSORES, timeout=0.3)
+            t_inicio = time.time()
+            encontrado = False
+            # Esperar hasta 2.3s para superar el reseteo del bootloader de Arduino Uno
+            while time.time() - t_inicio < 2.3:
+                linea = s.readline().decode('utf-8', errors='ignore').strip()
+                if "TLM:" in linea or "Arduino Sensores" in linea:
+                    encontrado = True
+                    break
+            if encontrado:
                 ser_sensores = s
                 puerto_sensores = p
+                puerto_sensores_asignado = p
                 ok_sensores = True
-                msg_sensores = f"Conectado en {p} (telemetría TLM activa)"
+                msg_sensores = f"Detectado en {p} (115200 baud, TLM activo)"
                 break
             else:
                 s.close()
         except Exception:
             pass
 
-    # Puertos disponibles para el Arduino de Motores
+    # 2. Probar puertos restantes a 9600 buscando Arduino Motores
     puertos_restantes = [p for p in puertos if p != puerto_sensores]
-
-    # Si no detectó TLM pero hay puertos, intentar conectar el puerto preferido
-    if not ok_sensores and puertos_restantes:
-        p = PUERTO_SENSORES if PUERTO_SENSORES in puertos_restantes else puertos_restantes[0]
-        try:
-            ser_sensores = serial.Serial(p, BAUD_SENSORES, timeout=0.1)
-            ok_sensores = True
-            puerto_sensores = p
-            msg_sensores = f"Conectado en {p}"
-            puertos_restantes.remove(p)
-        except Exception as e:
-            msg_sensores = f"Error al abrir {p}: {e}"
-
-    # 2. Conectar Arduino Motores en el puerto restante a 9600 baudios
     for p in puertos_restantes:
         try:
-            ser_motores = serial.Serial(p, BAUD_MOTORES, timeout=0.1)
-            ok_motores = True
-            msg_motores = f"Conectado en {p}"
-            break
-        except Exception as e:
-            msg_motores = f"Error al abrir {p}: {e}"
+            s = serial.Serial(p, BAUD_MOTORES, timeout=0.3)
+            time.sleep(0.2)
+            s.write(b"\nK\nQ\n")
+            s.flush()
+            t_inicio = time.time()
+            encontrado = False
+            while time.time() - t_inicio < 2.3:
+                linea = s.readline().decode('utf-8', errors='ignore').strip()
+                if any(tag in linea for tag in ["SWITCH:", "POS:", "Motores", "Homing", "Listo", "Switch", "STEP:"]):
+                    encontrado = True
+                    break
+            if encontrado:
+                ser_motores = s
+                puerto_motores = p
+                puerto_motores_asignado = p
+                ok_motores = True
+                msg_motores = f"Detectado en {p} (9600 baud, control motores activo)"
+                break
+            else:
+                s.close()
+        except Exception:
+            pass
 
-    if not ok_motores and not ser_motores:
-        msg_motores = f"No detectado (puertos libres: {puertos_restantes})"
+    # 3. Asignación por descarte si solo uno respondió activamente
+    puertos_libres = [p for p in puertos if p != puerto_sensores and p != puerto_motores]
+
+    if ok_sensores and not ok_motores and puertos_libres:
+        p_cand = puertos_libres[0]
+        try:
+            ser_motores = serial.Serial(p_cand, BAUD_MOTORES, timeout=0.1)
+            ok_motores = True
+            puerto_motores_asignado = p_cand
+            msg_motores = f"Asignado en {p_cand} (9600 baud, por descarte)"
+        except Exception as e:
+            msg_motores = f"Error al abrir {p_cand}: {e}"
+
+    elif ok_motores and not ok_sensores and puertos_libres:
+        p_cand = puertos_libres[0]
+        try:
+            ser_sensores = serial.Serial(p_cand, BAUD_SENSORES, timeout=0.1)
+            ok_sensores = True
+            puerto_sensores_asignado = p_cand
+            msg_sensores = f"Asignado en {p_cand} (115200 baud, por descarte)"
+        except Exception as e:
+            msg_sensores = f"Error al abrir {p_cand}: {e}"
 
     return (ok_sensores, msg_sensores), (ok_motores, msg_motores)
 
@@ -353,6 +385,7 @@ def enviar_motor(cmd):
     if ser_motores and ser_motores.is_open:
         try:
             ser_motores.write(cmd.encode())
+            ser_motores.flush()
             alerta_motores_mostrada = False
         except Exception:
             if not alerta_motores_mostrada:
@@ -362,17 +395,30 @@ def mover_stepper(steps):
     global ultimo_comando_stepper
     if ser_motores and ser_motores.is_open and steps != 0:
         try:
-            ser_motores.write(f"T{steps}\n".encode())
-            ultimo_comando_stepper = f"T{steps:+d} pasos"
-        except Exception:
-            pass
+            if steps == -30:
+                ser_motores.write(b"<\n")
+            elif steps == 30:
+                ser_motores.write(b">\n")
+            else:
+                ser_motores.write(f"T{steps}\n".encode())
+            ser_motores.flush()
+            ultimo_comando_stepper = f"T{steps:+d} pasos (enviado a {puerto_motores_asignado})"
+        except Exception as e:
+            ultimo_comando_stepper = f"Error stepper: {e}"
+    else:
+        if not ser_motores or not ser_motores.is_open:
+            ultimo_comando_stepper = "FALLO: Motores NO conectado"
 
 def centrar_camara():
     global pos_stepper_actual, ultimo_comando_stepper
-    if pos_stepper_actual != 0:
-        mover_stepper(-pos_stepper_actual)
-        pos_stepper_actual = 0
-        ultimo_comando_stepper = "Centrado (0)"
+    if ser_motores and ser_motores.is_open:
+        try:
+            ser_motores.write(b"C\n")
+            ser_motores.flush()
+        except Exception:
+            pass
+    pos_stepper_actual = 0
+    ultimo_comando_stepper = f"Centrado (0) (enviado a {puerto_motores_asignado})"
 
 # ==========================================
 # HILO 1: LECTURA DE ARDUINO SENSORES
@@ -718,6 +764,7 @@ def renderizar_dashboard():
         make_box_row(f"ESTADO DEL ROBOT : [ {estado_actual.center(22)} ]"),
         div,
         make_box_row(f"🎤 VOZ ESCUCHADA  : {ultima_voz_escuchada}"),
+        make_box_row(f"🔌 PUERTOS USB    : Sensores={puerto_sensores_asignado} | Motores={puerto_motores_asignado}"),
         make_box_row(f"📡 SENSORES LÍNEA : {linea_str}"),
         make_box_row(f"📏 ULTRASONIDO    : {dist_str}"),
         make_box_row(f"⚙️ MOTORES CHASIS : {motor_desc}"),
