@@ -9,6 +9,10 @@ const int M2_A = 6; const int M2_B = 7;
 const int M4_A = 8; const int M4_B = 9;
 
 // ── MOTOR PASO A PASO (Paneo Cámara 28BYJ-48) ──
+// Secuencia estándar para ULN2003 en pines 10, 11, 12, 13:
+// La librería Stepper requiere el orden IN1, IN3, IN2, IN4:
+// IN1=10, IN3=12, IN2=11, IN4=13 -> (10, 12, 11, 13)
+// Con esto el motor tiene torque pleno y gira simétricamente en AMBAS direcciones.
 const int STEPS_PER_REV   = 2048;
 const int HALF_REV        = 1024;
 const int QUARTER_REV     = 512;
@@ -21,7 +25,7 @@ const int BUSQUEDA_HOMING = 250;  // Búsqueda suave de homing: ±250 pasos (~44
 const int TRACK_SPEED_RPM = 7;   // Velocidad con torque óptimo para no trabarse con la cámara
 const int MAX_TRACK_STEP  = 40;  // Límite de pasos por comando individual
 
-Stepper stepper(STEPS_PER_REV, 11, 13, 12, 10);
+Stepper stepper(STEPS_PER_REV, 10, 12, 11, 13);
 
 bool autoPan      = false;
 int  panDirection = -1;
@@ -48,6 +52,13 @@ void procesarComando(char tecla) {
 }
 
 // ── FUNCIONES DEL STEPPER ──
+void apagarBobinas() {
+  digitalWrite(10, LOW);
+  digitalWrite(11, LOW);
+  digitalWrite(12, LOW);
+  digitalWrite(13, LOW);
+}
+
 bool switchPressed() {
   return digitalRead(SWITCH_PIN) == LOW;
 }
@@ -61,6 +72,7 @@ void goHome() {
     Serial.println(F("Switch ya presionado al inicio (centro 90 deg OK)."));
     currentPos = 0;
     Serial.println(F("POS:0"));
+    apagarBobinas();
     return;
   }
 
@@ -72,6 +84,7 @@ void goHome() {
       Serial.println(F("Switch encontrado (calibrado en centro 90 deg)."));
       currentPos = 0;
       Serial.println(F("POS:0"));
+      apagarBobinas();
       return;
     }
     stepper.step(1);
@@ -84,6 +97,7 @@ void goHome() {
       Serial.println(F("Switch encontrado en barrido opuesto (calibrado en centro 90 deg)."));
       currentPos = 0;
       Serial.println(F("POS:0"));
+      apagarBobinas();
       return;
     }
     stepper.step(-1);
@@ -99,6 +113,7 @@ void goHome() {
   currentPos = 0;
   Serial.println(F("Posicion actual asumida como centro (0 pasos / 90 deg)."));
   Serial.println(F("POS:0"));
+  apagarBobinas();
 }
 
 void moveSteps(int steps) {
@@ -135,6 +150,7 @@ void trackStep(int steps) {
   if (effectiveSteps != 0) {
     stepper.setSpeed(TRACK_SPEED_RPM);
     moveSteps(effectiveSteps);
+    apagarBobinas();
     Serial.print(F("STEP:"));
     Serial.print(effectiveSteps);
     Serial.print(F(" POS:"));
@@ -167,6 +183,7 @@ void ejecutarComandoSimple(char c) {
       if (currentPos != 0) {
         stepper.setSpeed(TRACK_SPEED_RPM);
         moveSteps(-currentPos);
+        apagarBobinas();
       }
       currentPos = 0;
       Serial.println(F("POS:0"));
@@ -178,6 +195,7 @@ void ejecutarComandoSimple(char c) {
       if (delta != 0) {
         stepper.setSpeed(TRACK_SPEED_RPM);
         moveSteps(delta);
+        apagarBobinas();
       }
       Serial.print(F("POS:"));
       Serial.println(currentPos);
@@ -190,6 +208,7 @@ void ejecutarComandoSimple(char c) {
       if (delta != 0) {
         stepper.setSpeed(TRACK_SPEED_RPM);
         moveSteps(delta);
+        apagarBobinas();
       }
       Serial.print(F("POS:"));
       Serial.println(currentPos);
@@ -200,6 +219,8 @@ void ejecutarComandoSimple(char c) {
       autoPan = !autoPan;
       if (autoPan) {
         panDirection = -1;
+      } else {
+        apagarBobinas();
       }
       break;
 
@@ -234,7 +255,11 @@ void setup() {
   for (int i = 0; i < 8; i++) pinMode(pinesMotores[i], OUTPUT);
 
   pinMode(SWITCH_PIN, INPUT_PULLUP);
-  stepper.setSpeed(6);
+  pinMode(10, OUTPUT);
+  pinMode(11, OUTPUT);
+  pinMode(12, OUTPUT);
+  pinMode(13, OUTPUT);
+  apagarBobinas();
 
   Serial.println(F("Iniciando Arduino Motores y Stepper..."));
   Serial.print(F("Estado inicial Switch A5: "));

@@ -19,7 +19,7 @@ const int SWITCH_OFFSET = 100;
 const int TRACK_SPEED_RPM = 12;  // faster than auto-pan, for responsiveness
 const int MAX_TRACK_STEP  = 40;  // clamp on how far a single command can move
 
-Stepper stepper(STEPS_PER_REV, 11, 13, 12, 10);
+Stepper stepper(STEPS_PER_REV, 10, 12, 11, 13);
 
 bool autoPan      = false;
 int  panDirection = -1;
