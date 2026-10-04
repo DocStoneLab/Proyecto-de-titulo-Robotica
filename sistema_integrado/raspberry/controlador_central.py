@@ -673,6 +673,10 @@ def hilo_teclado():
                 enviar_motor('Z')
                 ultimo_evento_teclado = "Test LEDs ULN2003 (Z: A->B->C->D)"
                 renderizar_dashboard()
+            elif cmd == 'i':
+                enviar_motor('I')
+                ultimo_evento_teclado = "Invertir sentido giro cámara (I)"
+                renderizar_dashboard()
             elif cmd == 'q':
                 ultimo_evento_teclado = "Saliendo..."
                 running = False

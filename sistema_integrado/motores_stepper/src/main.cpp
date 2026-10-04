@@ -8,11 +8,15 @@ const int M2_A = 6; const int M2_B = 7;
 const int M4_A = 8; const int M4_B = 9;
 
 // ── MOTOR PASO A PASO (Paneo Cámara 28BYJ-48 con ULN2003) ──
-// Pines físicos en Arduino Uno
-const int PIN_IN1 = 10;
-const int PIN_IN2 = 11;
+// Mapeo físico exacto obtenido del diagnóstico LED Z (secuencia D A C B):
+// Pin 11 -> IN1 (LED A)
+// Pin 13 -> IN2 (LED B)
+// Pin 12 -> IN3 (LED C)
+// Pin 10 -> IN4 (LED D)
+const int PIN_IN1 = 11;
+const int PIN_IN2 = 13;
 const int PIN_IN3 = 12;
-const int PIN_IN4 = 13;
+const int PIN_IN4 = 10;
 
 const int SWITCH_PIN      = A5;
 const int MAX_PAN_STEPS   = 450;  // Límite seguro (~79° a cada lado, 11° antes del tope de 180° y 0°)
@@ -35,6 +39,7 @@ int  stepIndex    = 0;
 bool autoPan      = false;
 int  panDirection = -1;
 int  currentPos   = 0; // Posición actual en pasos (-450 a +450, 0 = 90° centro)
+bool invertDir    = false;
 
 String inputBuffer = "";
 
@@ -89,7 +94,8 @@ void doOneHalfStep(int dir, unsigned int delayMicros) {
 // Ejecuta N pasos completos (cada paso son 2 medios pasos) con rampa de aceleración
 void stepMotorHalf(int steps) {
   if (steps == 0) return;
-  int dir = (steps > 0) ? 1 : -1;
+  int baseDir = (steps > 0) ? 1 : -1;
+  int dir = invertDir ? -baseDir : baseDir;
   int totalHalfSteps = abs(steps) * 2;
 
   for (int i = 0; i < totalHalfSteps; i++) {
@@ -284,6 +290,12 @@ void ejecutarComandoSimple(char c) {
       digitalWrite(PIN_IN4, HIGH); delay(400); digitalWrite(PIN_IN4, LOW);
       apagarBobinas();
       Serial.println(F("TEST_COILS_FIN"));
+      break;
+
+    case 'I': // Invertir sentido de giro (útil si la dirección física está invertida)
+      invertDir = !invertDir;
+      Serial.print(F("INVERT:"));
+      Serial.println(invertDir ? F("ON") : F("OFF"));
       break;
 
     case '\n': case '\r':
