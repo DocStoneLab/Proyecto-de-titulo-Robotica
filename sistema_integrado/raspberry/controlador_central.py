@@ -436,7 +436,7 @@ def hilo_reconocimiento_voz():
 # HILO 3: ENTRADA POR TECLADO (FALLBACK SSH)
 # ==========================================
 def hilo_teclado():
-    global estado_actual, running
+    global estado_actual, running, pos_stepper_actual
     while running:
         try:
             line = sys.stdin.readline()
@@ -444,23 +444,32 @@ def hilo_teclado():
                 break
             cmd = line.strip().lower()
             if cmd == 'b':
-                print("\n⌨️ [TECLADO] Comando 'b' recibido.")
                 iniciar_busqueda()
             elif cmd == 'r':
-                print("\n⌨️ [TECLADO] Comando 'r': Iniciando retorno a la pista...")
                 iniciar_retorno_a_pista()
+            elif cmd in ['j', 'left']:
+                # Gira la cámara 30 pasos hacia la izquierda
+                mover_stepper(-30)
+                pos_stepper_actual -= 30
+            elif cmd in ['l', 'right']:
+                # Gira la cámara 30 pasos hacia la derecha
+                mover_stepper(30)
+                pos_stepper_actual += 30
             elif cmd == 'h':
-                print("\n⌨️ [TECLADO] Comando 'h': Calibrando/Centrando cámara...")
-                enviar_motor('H')
+                centrar_camara()
+            elif cmd.startswith('t') and len(cmd) > 1:
+                try:
+                    pasos = int(cmd[1:].strip())
+                    mover_stepper(pasos)
+                    pos_stepper_actual += pasos
+                except Exception:
+                    pass
             elif cmd == 'k':
-                print("\n⌨️ [TECLADO] Comando 'k': Consultando estado del switch A5...")
                 enviar_motor('K')
             elif cmd == ' ':
-                print("\n⌨️ [TECLADO] Freno manual activado.")
                 enviar_motor(' ')
                 estado_actual = EstadoSistema.REPOSO
             elif cmd == 'q':
-                print("\n⌨️ [TECLADO] Cerrando sistema...")
                 running = False
                 break
         except Exception:
@@ -591,7 +600,7 @@ def renderizar_dashboard():
         f"║ 🎥 CÁMARA (PAN)   : {stepper_str[:53].ljust(55)}║\n"
         f"║ 🎯 VISIÓN YOLO    : {vision_str[:53].ljust(55)}║\n"
         "╠══════════════════════════════════════════════════════════════════════════════╣\n"
-        "║ ⌨️ TECLAS: [b] Buscar | [r] Retorno | [h] Centrar cámara | [ ] Parar | [q] Salir  ║\n"
+        "║ ⌨️ TECLAS: [j/l] Gira Cámara | [h] Centrar | [b] Buscar | [ ] Stop | [q] Salir  ║\n"
         "╚══════════════════════════════════════════════════════════════════════════════╝\n"
     )
     sys.stdout.write(panel)
@@ -619,52 +628,45 @@ def main():
 
     try:
         while running:
-            # En reposo: espera inicio por voz o teclado
-            if estado_actual == EstadoSistema.REPOSO:
-                enviar_motor(' ')
-                time.sleep(0.1)
-                continue
-
-            # Gestión de apertura de cámara bajo demanda
+            # Gestión de apertura de cámara desde el inicio (transmisión continua)
             if cap is None or not cap.isOpened():
                 cap = cv2.VideoCapture(0)
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, ANCHO_IMAGEN)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 if not cap.isOpened():
                     if not alerta_camara_mostrada:
-                        print("❌ [ALERTA] No se detecta cámara conectada. Reintentando...")
                         alerta_camara_mostrada = True
                     time.sleep(1.0)
                     continue
                 else:
-                    if alerta_camara_mostrada:
-                        print("✅ [INFO] Cámara USB conectada y activa.")
-                        alerta_camara_mostrada = False
+                    alerta_camara_mostrada = False
 
             ret, frame = cap.read()
             if not ret:
                 if not alerta_camara_mostrada:
-                    print("❌ [ALERTA] La cámara no entregó imagen. Reintentando...")
                     alerta_camara_mostrada = True
-                time.sleep(0.5)
+                time.sleep(0.2)
                 continue
             else:
                 alerta_camara_mostrada = False
 
             frame_counter += 1
 
-            if estado_actual == EstadoSistema.SEGUIR_PISTA:
+            # Control de chasis según estado del sistema
+            if estado_actual == EstadoSistema.REPOSO:
+                enviar_motor(' ')
+            elif estado_actual == EstadoSistema.SEGUIR_PISTA:
                 ejecutar_seguimiento_linea()
 
-            # Procesamiento con servidor YOLO (1 de cada 4 frames)
-            if frame_counter % 4 == 0 and estado_actual in [EstadoSistema.SEGUIR_PISTA, EstadoSistema.ALINEANDO_MOCHILA, EstadoSistema.AVANZANDO_A_MOCHILA]:
+            # Transmisión y procesamiento continuo con YOLO (1 de cada 3 frames en todo momento)
+            if frame_counter % 3 == 0:
                 _, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
 
                 try:
                     res = requests.post(
                         SERVER_URL,
                         files={'image': ('frame.jpg', encoded.tobytes(), 'image/jpeg')},
-                        timeout=2.5
+                        timeout=2.0
                     )
                     data = res.json()
                     alerta_servidor_mostrada = False
@@ -690,29 +692,30 @@ def main():
                             'conf': conf
                         }
 
-                        # Centrar cámara en la mochila detectada
-                        steps_stepper = int(error_x * 0.12)
-                        if steps_stepper != 0:
-                            mover_stepper(steps_stepper)
-                            pos_stepper_actual += steps_stepper
+                        # En estados activos de búsqueda, guiar chasis y cámara hacia la mochila
+                        if estado_actual in [EstadoSistema.SEGUIR_PISTA, EstadoSistema.ALINEANDO_MOCHILA, EstadoSistema.AVANZANDO_A_MOCHILA]:
+                            steps_stepper = int(error_x * 0.12)
+                            if steps_stepper != 0:
+                                mover_stepper(steps_stepper)
+                                pos_stepper_actual += steps_stepper
 
-                        if abs(error_x) > MARGEN_CENTRO_PX:
-                            estado_actual = EstadoSistema.ALINEANDO_MOCHILA
-                            if error_x < 0:
-                                enviar_motor('a')
-                                direccion_giro_inicial = 'a'
+                            if abs(error_x) > MARGEN_CENTRO_PX:
+                                estado_actual = EstadoSistema.ALINEANDO_MOCHILA
+                                if error_x < 0:
+                                    enviar_motor('a')
+                                    direccion_giro_inicial = 'a'
+                                else:
+                                    enviar_motor('d')
+                                    direccion_giro_inicial = 'd'
                             else:
-                                enviar_motor('d')
-                                direccion_giro_inicial = 'd'
-                        else:
-                            if estado_actual != EstadoSistema.AVANZANDO_A_MOCHILA:
-                                estado_actual = EstadoSistema.AVANZANDO_A_MOCHILA
-                                tiempo_avance_inicio = time.time()
-                            enviar_motor('w')
+                                if estado_actual != EstadoSistema.AVANZANDO_A_MOCHILA:
+                                    estado_actual = EstadoSistema.AVANZANDO_A_MOCHILA
+                                    tiempo_avance_inicio = time.time()
+                                enviar_motor('w')
                     else:
                         info_mochila = {'detectada': False, 'center_x': 0, 'error_x': 0, 'conf': 0.0}
 
-                        # Paneo activo de cámara durante la búsqueda en pista
+                        # Paneo activo de cámara durante la búsqueda en pista si no hay mochila
                         if estado_actual == EstadoSistema.SEGUIR_PISTA:
                             if time.time() - t_ultimo_barrido > 0.15:
                                 t_ultimo_barrido = time.time()
