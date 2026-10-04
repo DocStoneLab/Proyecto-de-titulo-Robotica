@@ -33,6 +33,8 @@ import select
 import termios
 import tty
 import atexit
+import collections
+import statistics
 import speech_recognition as sr
 from alert_sound import sonar_alerta, sonar_conexion, MAC_PARLANTE
 
@@ -154,10 +156,11 @@ class EstadoSistema:
 estado_actual = EstadoSistema.REPOSO
 
 # Telemetría de sensores
-distancia_frente = 999
-linea_izq        = 0
-linea_cen        = 0
-linea_der        = 0
+distancia_frente     = 999
+historial_distancias = collections.deque(maxlen=5)
+linea_izq            = 0
+linea_cen            = 0
+linea_der            = 0
 
 # Variables para interfaz en vivo (Dashboard)
 ultima_voz_escuchada    = "(esperando comando...)"
@@ -450,10 +453,22 @@ def hilo_lectura_sensores():
                     partes = linea[idx+4:].split(',')
                     if len(partes) >= 4:
                         try:
-                            distancia_frente = int(partes[0].strip())
-                            linea_izq        = int(partes[1].strip())
-                            linea_cen        = int(partes[2].strip())
-                            linea_der        = int(partes[3].strip())
+                            dist_raw  = int(partes[0].strip())
+                            linea_izq = int(partes[1].strip())
+                            linea_cen = int(partes[2].strip())
+                            linea_der = int(partes[3].strip())
+
+                            # Filtro estabilizador de mediana contra rebotes y ruido acústico
+                            if 0 < dist_raw < 400:
+                                historial_distancias.append(dist_raw)
+                                lecturas_validas = [d for d in historial_distancias if d < 400]
+                                if lecturas_validas:
+                                    distancia_frente = int(statistics.median(lecturas_validas))
+                            else:
+                                historial_distancias.append(999)
+                                if historial_distancias.count(999) >= 3:
+                                    distancia_frente = 999
+
                             paquetes_sensores += 1
                             t_ultimo_tlm = time.time()
                             alerta_sensores_mostrada = False
@@ -804,10 +819,14 @@ def renderizar_dashboard():
     linea_str = f"[{izq_sym} IZQ] [{cen_sym} CEN] [{der_sym} DER]  ({linea_izq},{linea_cen},{linea_der}) | {flujo_str}"
 
     # 2. Sensor Ultrasonido
-    if distancia_frente < 400:
+    if distancia_frente <= 15:
+        dist_str = f"🛑 {distancia_frente} cm (¡MUY CERCA / OBJETIVO!)"
+    elif distancia_frente < 100:
+        dist_str = f"⚠️ {distancia_frente} cm (Cercano)"
+    elif distancia_frente < 400:
         dist_str = f"{distancia_frente} cm"
     else:
-        dist_str = "> 100 cm (Libre)"
+        dist_str = "> 100 cm (Despejado)"
 
     # 3. Motores Chasis
     motor_desc = {
