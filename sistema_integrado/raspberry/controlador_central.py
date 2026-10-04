@@ -197,6 +197,18 @@ hw_sensores_ok  = False
 hw_motores_ok   = False
 hw_servidor_ok  = False
 
+# Mensajes detallados de autodiagnóstico para el panel permanente
+msg_mic          = "Comprobando..."
+msg_parlante     = "Comprobando..."
+msg_camara       = "Comprobando..."
+msg_sensores     = "Comprobando..."
+msg_motores      = "Comprobando..."
+msg_servidor     = "Comprobando..."
+
+# Métricas de flujo de datos de sensores
+paquetes_sensores = 0
+t_ultimo_tlm      = 0
+
 # Banderas para avisar 1 sola vez en desconexión
 alerta_camara_mostrada   = False
 alerta_servidor_mostrada = False
@@ -349,6 +361,7 @@ def test_servidor_yolo():
 
 def autodiagnostico_hardware():
     global hw_mic_ok, hw_parlante_ok, hw_camara_ok, hw_sensores_ok, hw_motores_ok, hw_servidor_ok
+    global msg_mic, msg_parlante, msg_camara, msg_sensores, msg_motores, msg_servidor
 
     print("\n" + "="*62)
     print("         AUTODIAGNÓSTICO MODULAR DEL SISTEMA (NAVBOT)         ")
@@ -425,25 +438,35 @@ def centrar_camara():
 # ==========================================
 def hilo_lectura_sensores():
     global distancia_frente, linea_izq, linea_cen, linea_der, running, alerta_sensores_mostrada
+    global paquetes_sensores, t_ultimo_tlm
     while running:
         if ser_sensores and ser_sensores.is_open:
             try:
                 linea = ser_sensores.readline().decode('utf-8', errors='ignore').strip()
-                if linea.startswith("TLM:"):
-                    partes = linea[4:].split(',')
-                    if len(partes) == 4:
-                        distancia_frente = int(partes[0])
-                        linea_izq        = int(partes[1])
-                        linea_cen        = int(partes[2])
-                        linea_der        = int(partes[3])
+                if "TLM:" in linea:
+                    idx = linea.find("TLM:")
+                    partes = linea[idx+4:].split(',')
+                    if len(partes) >= 4:
+                        try:
+                            distancia_frente = int(partes[0].strip())
+                            linea_izq        = int(partes[1].strip())
+                            linea_cen        = int(partes[2].strip())
+                            linea_der        = int(partes[3].strip())
+                            paquetes_sensores += 1
+                            t_ultimo_tlm = time.time()
+                            alerta_sensores_mostrada = False
+                        except ValueError:
+                            pass
                 elif "EVT:OBJETIVO_10CM" in linea and estado_actual != EstadoSistema.EN_OBJETIVO_SONIDO:
                     notificar_llegada_mochila()
-                alerta_sensores_mostrada = False
+
+                # Si hay líneas acumuladas en el búfer serial, vaciar para tener telemetría en tiempo real
+                if ser_sensores.in_waiting > 120:
+                    ser_sensores.reset_input_buffer()
             except Exception:
                 if not alerta_sensores_mostrada:
-                    print("⚠️ [ALERTA] Se interrumpió la lectura de Arduino Sensores.")
                     alerta_sensores_mostrada = True
-        time.sleep(0.02)
+        time.sleep(0.01)
 
 # ==========================================
 # HILO 2: RECONOCIMIENTO DE VOZ
@@ -717,11 +740,27 @@ def renderizar_dashboard():
     if not sys.stdin.isatty():
         return
 
+    # 0. Símbolos de diagnóstico de hardware
+    sim_mic = "✅" if hw_mic_ok else "❌"
+    sim_par = "✅" if hw_parlante_ok else "❌"
+    sim_cam = "✅" if hw_camara_ok else "❌"
+    sim_sen = "✅" if hw_sensores_ok else "❌"
+    sim_mot = "✅" if hw_motores_ok else "❌"
+    sim_srv = "✅" if hw_servidor_ok else "⚠️"
+
     # 1. Sensores de línea (TCRT5000)
     izq_sym = "■" if linea_izq else "□"
     cen_sym = "■" if linea_cen else "□"
     der_sym = "■" if linea_der else "□"
-    linea_str = f"[{izq_sym} IZQ] [{cen_sym} CEN] [{der_sym} DER]  ({linea_izq},{linea_cen},{linea_der})"
+
+    if paquetes_sensores > 0 and (time.time() - t_ultimo_tlm < 1.0):
+        flujo_str = f"Activo ({paquetes_sensores} lecturas)"
+    elif paquetes_sensores > 0:
+        flujo_str = "⚠️ Pausado / Señal perdida"
+    else:
+        flujo_str = "❌ Sin datos (Verifica USB/puerto)"
+
+    linea_str = f"[{izq_sym} IZQ] [{cen_sym} CEN] [{der_sym} DER]  ({linea_izq},{linea_cen},{linea_der}) | {flujo_str}"
 
     # 2. Sensor Ultrasonido
     if distancia_frente < 400:
@@ -763,13 +802,20 @@ def renderizar_dashboard():
         make_box_row("NAVBOT - PANEL DE MONITOREO EN TIEMPO REAL".center(72)),
         make_box_row(f"ESTADO DEL ROBOT : [ {estado_actual.center(22)} ]"),
         div,
-        make_box_row(f"🎤 VOZ ESCUCHADA  : {ultima_voz_escuchada}"),
-        make_box_row(f"🔌 PUERTOS USB    : Sensores={puerto_sensores_asignado} | Motores={puerto_motores_asignado}"),
+        make_box_row("🛠️ DIAGNÓSTICO DE HARDWARE:"),
+        make_box_row(f"   [{sim_mic}] MICRÓFONO USB    : {msg_mic}"),
+        make_box_row(f"   [{sim_par}] PARLANTE BT      : {msg_parlante}"),
+        make_box_row(f"   [{sim_cam}] CÁMARA USB       : {msg_camara}"),
+        make_box_row(f"   [{sim_sen}] ARDUINO SENSORES : {msg_sensores}"),
+        make_box_row(f"   [{sim_mot}] ARDUINO MOTORES  : {msg_motores}"),
+        make_box_row(f"   [{sim_srv}] SERVIDOR YOLO    : {msg_servidor}"),
+        div,
         make_box_row(f"📡 SENSORES LÍNEA : {linea_str}"),
         make_box_row(f"📏 ULTRASONIDO    : {dist_str}"),
         make_box_row(f"⚙️ MOTORES CHASIS : {motor_desc}"),
         make_box_row(f"🎥 CÁMARA (PAN)   : {stepper_str}"),
         make_box_row(f"🎯 VISIÓN YOLO    : {vision_str}"),
+        make_box_row(f"🎤 VOZ ESCUCHADA  : {ultima_voz_escuchada}"),
         div,
         make_box_row(f"⌨️ ÚLTIMA ACCIÓN  : {ultimo_evento_teclado}"),
         make_box_row(f"📢 ESTADO / EVENTO: {ultimo_evento_sistema}"),
