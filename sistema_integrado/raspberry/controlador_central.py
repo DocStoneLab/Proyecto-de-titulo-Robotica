@@ -100,8 +100,9 @@ except Exception:
 # ==========================================
 # CONFIGURACIÓN GENERAL
 # ==========================================
-# IP de tu PC donde corre remote_yolo_script.py
-SERVER_URL = 'http://192.168.100.89:5000/detect'
+# IP de tu PC donde corre remote_yolo_script.py (soporta Ethernet .13 y Wi-Fi .89)
+CANDIDATOS_IP_YOLO = ['192.168.100.13', '192.168.100.89','100.64.158.87']
+SERVER_URL = f'http://{CANDIDATOS_IP_YOLO[0]}:5000/detect'
 
 PUERTO_SENSORES = '/dev/ttyACM0'  # Arduino Sensores (Línea + Ultrasonido)
 BAUD_SENSORES   = 115200
@@ -111,9 +112,10 @@ BAUD_MOTORES    = 9600
 
 CLASE_OBJETIVO        = 'mochila'
 ANCHO_IMAGEN          = 640
-CENTRO_X_OBJETIVO     = 320
-MARGEN_CENTRO_PX      = 45
-DISTANCIA_OBJETIVO_CM = 10
+CENTRO_X_OBJETIVO       = 320
+MARGEN_CENTRO_PX        = 35        # Tolerancia en px para considerar centrada la mochila en cámara
+MARGEN_ALINEACION_PASOS = 25        # Tolerancia en pasos (~4.4°) para considerar alineado el chasis con la cámara
+DISTANCIA_OBJETIVO_CM   = 15        # Distancia en cm para detenerse ante el objetivo
 
 TRIGGER_VOZ_BUSCAR = [
     "donde esta la mochila",
@@ -171,11 +173,12 @@ LIMITE_PAN_PASOS        = 450
 estado_switch_hardware  = "Desconocido"
 dir_stepper_barrido     = 1
 t_ultimo_barrido        = 0
-PASO_BARRIDO            = 20
-LIMITE_BARRIDO_PASOS    = 240
+PASO_BARRIDO            = 15        # Pasos por incremento durante el barrido en pista (~2.6°)
+LIMITE_BARRIDO_PASOS    = 142       # ±25° de barrido suave (142 pasos del 28BYJ-48)
 info_mochila            = {'detectada': False, 'center_x': 0, 'error_x': 0, 'conf': 0.0}
 ultimo_evento_teclado   = "Esperando tecla..."
 ultimo_evento_sistema   = "Sistema iniciado en REPOSO"
+t_ultima_deteccion      = 0         # Timestamp del último fotograma donde se vio la mochila
 
 def log_evento(msg):
     global ultimo_evento_sistema
@@ -351,18 +354,24 @@ def detectar_arduinos():
     return (ok_sensores, msg_sensores), (ok_motores, msg_motores)
 
 def test_servidor_yolo():
-    try:
-        # Intentar conectar con la ruta raíz o /detect con timeout corto
-        res = requests.get('http://192.168.100.89:5000/', timeout=1.5)
-        if res.status_code in [200, 404]:
-            return True, f"En línea (http://192.168.100.89:5000)"
-    except Exception:
-        pass
-    try:
-        res = requests.post(SERVER_URL, timeout=1.5)
-        return True, f"En línea ({SERVER_URL})"
-    except Exception:
-        return False, f"Sin respuesta ({SERVER_URL})"
+    global SERVER_URL
+    for ip in CANDIDATOS_IP_YOLO:
+        base_url = f"http://{ip}:5000"
+        detect_url = f"{base_url}/detect"
+        try:
+            res = requests.get(f"{base_url}/", timeout=1.2)
+            if res.status_code in [200, 404, 405]:
+                SERVER_URL = detect_url
+                return True, f"En línea ({base_url})"
+        except Exception:
+            pass
+        try:
+            res = requests.post(detect_url, timeout=1.2)
+            SERVER_URL = detect_url
+            return True, f"En línea ({detect_url})"
+        except Exception:
+            pass
+    return False, f"Sin respuesta (probado: {', '.join(CANDIDATOS_IP_YOLO)}:5000)"
 
 def autodiagnostico_hardware():
     global hw_mic_ok, hw_parlante_ok, hw_camara_ok, hw_sensores_ok, hw_motores_ok, hw_servidor_ok
@@ -704,7 +713,7 @@ def hilo_teclado():
 # ==========================================
 def notificar_llegada_mochila():
     global estado_actual, tiempo_avance_total
-    log_evento("🎯 Objetivo mochila alcanzado (<=10 cm)")
+    log_evento("🎯 Objetivo mochila alcanzado (<=15 cm)")
     enviar_motor(' ')
     centrar_camara()
     estado_actual = EstadoSistema.EN_OBJETIVO_SONIDO
@@ -849,7 +858,7 @@ def renderizar_dashboard():
         vision_str = f"🎯 ENCONTRADA | X={info_mochila['center_x']}px | Error={info_mochila['error_x']:+d}px ({dir_err}) | Conf={info_mochila['conf']*100:.0f}%"
     else:
         if estado_actual == EstadoSistema.SEGUIR_PISTA:
-            vision_str = "🔍 Buscando... (Barrido de cámara activo)"
+            vision_str = "🔍 Buscando... (Barrido de cámara ±25°)"
         elif estado_actual == EstadoSistema.REPOSO:
             vision_str = "⏸️ Sistema en reposo (esperando orden)"
         else:
@@ -914,7 +923,7 @@ def hilo_dashboard_terminal():
 def main():
     global estado_actual, running, direccion_giro_inicial, tiempo_avance_inicio
     global alerta_camara_mostrada, alerta_servidor_mostrada
-    global t_ultimo_barrido, dir_stepper_barrido, pos_stepper_actual, info_mochila
+    global t_ultimo_barrido, dir_stepper_barrido, pos_stepper_actual, info_mochila, t_ultima_deteccion
 
     # 1. Autodiagnóstico modular de inicio
     autodiagnostico_hardware()
@@ -984,6 +993,7 @@ def main():
                             break
 
                     if mochila is not None:
+                        t_ultima_deteccion = time.time()
                         center_x = mochila.get('center_x', CENTRO_X_OBJETIVO)
                         conf = mochila.get('confidence', 0.0)
                         error_x  = center_x - CENTRO_X_OBJETIVO
@@ -995,39 +1005,65 @@ def main():
                             'conf': conf
                         }
 
-                        # En estados activos de búsqueda, guiar chasis y cámara hacia la mochila
+                        # En estados activos de búsqueda, coordinar cámara y chasis
                         if estado_actual in [EstadoSistema.SEGUIR_PISTA, EstadoSistema.ALINEANDO_MOCHILA, EstadoSistema.AVANZANDO_A_MOCHILA]:
-                            steps_stepper = int(error_x * 0.12)
-                            if steps_stepper != 0:
-                                mover_stepper(steps_stepper)
-                                pos_stepper_actual += steps_stepper
+                            # 1. Paneo de cámara: mantener el objetivo centrado en el fotograma (error_x -> 0)
+                            if abs(error_x) > 20:
+                                steps_stepper = int(error_x * 0.10)
+                                steps_stepper = max(-35, min(35, steps_stepper))
+                                if steps_stepper != 0:
+                                    mover_stepper(steps_stepper)
+                                    pos_stepper_actual += steps_stepper
 
-                            if abs(error_x) > MARGEN_CENTRO_PX:
+                            # 2. Coordinación con chasis: alinear el rumbo del chasis con el ángulo de la cámara
+                            if abs(pos_stepper_actual) > MARGEN_ALINEACION_PASOS:
                                 estado_actual = EstadoSistema.ALINEANDO_MOCHILA
-                                if error_x < 0:
-                                    enviar_motor('a')
-                                    direccion_giro_inicial = 'a'
-                                else:
+                                if pos_stepper_actual > MARGEN_ALINEACION_PASOS:
+                                    # Cámara apunta hacia la derecha: girar chasis a la derecha
                                     enviar_motor('d')
                                     direccion_giro_inicial = 'd'
+                                else:
+                                    # Cámara apunta hacia la izquierda: girar chasis a la izquierda
+                                    enviar_motor('a')
+                                    direccion_giro_inicial = 'a'
                             else:
-                                if estado_actual != EstadoSistema.AVANZANDO_A_MOCHILA:
-                                    estado_actual = EstadoSistema.AVANZANDO_A_MOCHILA
-                                    tiempo_avance_inicio = time.time()
-                                enviar_motor('w')
+                                # La cámara está prácticamente centrada con el frente del chasis (|pos| <= MARGEN)
+                                if abs(error_x) > MARGEN_CENTRO_PX:
+                                    # Microajuste de rumbo si aún persiste error visual fino
+                                    estado_actual = EstadoSistema.ALINEANDO_MOCHILA
+                                    if error_x > 0:
+                                        enviar_motor('d')
+                                        direccion_giro_inicial = 'd'
+                                    else:
+                                        enviar_motor('a')
+                                        direccion_giro_inicial = 'a'
+                                else:
+                                    # Chasis y cámara perfectamente alineados hacia la mochila: ¡Avanzar recto!
+                                    if estado_actual != EstadoSistema.AVANZANDO_A_MOCHILA:
+                                        estado_actual = EstadoSistema.AVANZANDO_A_MOCHILA
+                                        tiempo_avance_inicio = time.time()
+                                        log_evento("🎯 Mochila encarada: avanzando al objetivo")
+                                    enviar_motor('w')
                     else:
                         info_mochila = {'detectada': False, 'center_x': 0, 'error_x': 0, 'conf': 0.0}
 
-                        # Paneo activo de cámara durante la búsqueda en pista si no hay mochila
-                        if estado_actual == EstadoSistema.SEGUIR_PISTA:
-                            if time.time() - t_ultimo_barrido > 0.15:
+                        # Si estábamos alineando o avanzando y se perdió la detección temporalmente:
+                        if estado_actual in [EstadoSistema.ALINEANDO_MOCHILA, EstadoSistema.AVANZANDO_A_MOCHILA]:
+                            if time.time() - t_ultima_deteccion > 0.8:
+                                enviar_motor(' ')
+                                log_evento("⚠️ Objetivo fuera de visión, chasis en pausa")
+                        elif estado_actual == EstadoSistema.SEGUIR_PISTA:
+                            # Barrido suave de cámara (±25° = ±142 pasos) mientras sigue la línea en pista
+                            if time.time() - t_ultimo_barrido > 0.14:
                                 t_ultimo_barrido = time.time()
                                 paso = PASO_BARRIDO * dir_stepper_barrido
                                 mover_stepper(paso)
                                 pos_stepper_actual += paso
                                 if pos_stepper_actual >= LIMITE_BARRIDO_PASOS:
+                                    pos_stepper_actual = LIMITE_BARRIDO_PASOS
                                     dir_stepper_barrido = -1
                                 elif pos_stepper_actual <= -LIMITE_BARRIDO_PASOS:
+                                    pos_stepper_actual = -LIMITE_BARRIDO_PASOS
                                     dir_stepper_barrido = 1
 
                 except Exception:
