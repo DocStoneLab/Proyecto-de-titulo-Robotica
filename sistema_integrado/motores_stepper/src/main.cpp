@@ -324,7 +324,11 @@ void setup() {
   Serial.print(F("Estado inicial Switch A5: "));
   Serial.println(digitalRead(SWITCH_PIN) == LOW ? F("PRESIONADO (LOW)") : F("LIBRE (HIGH)"));
 
-  goHome();
+  // Posición inicial asumida al frente (0 pasos / 90° centro)
+  // Evita giros bruscos o choques contra topes al energizar el robot
+  currentPos = 0;
+  apagarBobinas();
+  Serial.println(F("Posicion inicial asumida al frente (POS:0, calibracion manual con 'H')."));
   Serial.println(F("Listo para recibir comandos desde Raspberry Pi (USB)."));
 }
 
